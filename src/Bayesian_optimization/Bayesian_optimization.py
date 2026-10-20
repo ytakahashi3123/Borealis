@@ -183,9 +183,14 @@ class Bayesian_optimization(orbital):
     # 収束の図（それまでの最良）。獲得関数の図は GPyOpt だけの機能だったので作らない
     setting = config['Bayesian_optimization']
     if setting.get('flag_image_convergence', False):
-      import matplotlib
-      matplotlib.use("Agg")
-      import matplotlib.pyplot as plt
+      # matplotlib は図を作るときだけ要る。無ければ図を作らずに終える（最適化の結果はすでに書いてある）
+      try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+      except ImportError:
+        print('[BO-Borealis] Warning: matplotlib is not installed; the convergence image is not written')
+        return
       error_history = solution_dict[self.str_error]
       if solution_dict['flag_maximize']:
         best = np.maximum.accumulate(error_history)

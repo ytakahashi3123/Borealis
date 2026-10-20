@@ -20,7 +20,12 @@ def test_bo_converges_and_is_reproducible(workdir):
     x, error = _read_bopt(workdir)
     assert len(error) == 25                      # 初期の 5 点 + 20 回
     assert error.min() < 1.0                     # 3 次元の球関数、厳密な最小は 0（範囲は [-10, 10]^3）
-    assert os.path.exists(os.path.join(workdir, "result_bopt", "convergence.png"))
+    # 収束の図は matplotlib があるときだけ作る（無ければ警告を出して飛ばす）
+    try:
+        import matplotlib  # noqa: F401
+        assert os.path.exists(os.path.join(workdir, "result_bopt", "convergence.png"))
+    except ImportError:
+        assert "matplotlib is not installed" in out
     rc, out = run_borealis(workdir, sphere_config("Bayesian_optimization"))
     assert rc == 0, out
     x2, error2 = _read_bopt(workdir)
