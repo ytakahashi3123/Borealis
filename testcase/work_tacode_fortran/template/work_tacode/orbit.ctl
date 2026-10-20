@@ -20,7 +20,7 @@
 6.67408e-11         # Gravitational constant, M.m2/kg2
 5.9723662e+24 #5.9722e+24          # Planet mass (Earth), kg
 6.3781370e+6        # Planet radius on Equator, m
-3.35281066474e-3       # Ellipticity 
+3.35281066474e-3       # Ellipticity
 7.292115e-5         # rotation rate, rad/s
 1.082629e-3         # dynamic form factor (J2) for potential calculation
 -2.5356e-6            # J3
@@ -29,13 +29,13 @@
 1.0e-9               # Density, kg
 300.e0               # Temperature, K
 1.0                  # Factor for atmospheric density
-3                    # Number of density factor case (denstiy factor file and reading ctl)
-0, 200, 400          # Lower bound of altitude
-1, 2, 2             # Density factor opimized
+4                    # Number of density factor case (denstiy factor file and reading ctl)
+0, 180, 200, 220          # Lower bound of altitude
+1, 1, 1, 1             # Density factor opimized
 25000               # Number of memory array
 7                   # Number of parameter
 "Height", "km"      # Parameters
-"O", "cm-3" 
+"O", "cm-3"
 "N2", "cm-3"
 "O2", "cm-3"
 "Mass_density", "g/cm-3"

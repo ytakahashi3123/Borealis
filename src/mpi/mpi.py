@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+from functools import wraps
 from mpi4py import MPI
 
 
@@ -42,10 +43,10 @@ class mpi():
       text_end = '\033[0m'
       flag_time_measurement = False
       if flag_time_measurement :
-        start_time = self.MPI.time()
+        start_time = MPI.Wtime()
         result = func(*args,**kargs)
-        elapsed_time = self.MPI.time() - start_time
-        if self.rank == 0:
+        elapsed_time = MPI.Wtime() - start_time
+        if MPI.COMM_WORLD.Get_rank() == 0:
           print('Elapsed time of '+str(func.__name__)+str(':'),text_yellow + str(elapsed_time) + text_end,'s')
       else :
         result = func(*args,**kargs)

@@ -2,25 +2,36 @@
 
 # Borealis adapter: Python script to run Borealis with preCICE for Shape Optimization.
 
+# 外部コード(SU2+shapeoptimizer_preCICE)はMPI並列で起動するため、Borealis本体はmpirunで起動しない。
+# 複数ケースの同時実行は、オプティマイザ側(PSO.num_parallel)がスレッドで目的関数を同時に呼び出すことで実現する。
+# 以前のジョブ依頼ファイル(job_requests)+外部監視スクリプト方式は previous/adapter_shapeoptimizer_requestfile.py を参照。
+
 import numpy as np
 import os
-import re
 import sys
 import shutil as shutil
 import subprocess
+import signal
+import atexit
+import threading
+import queue
 import time
-#import signal
 from orbital.orbital import orbital
 
 class adapter_shapeoptimizer(orbital):
-  
+
   def __init__(self,mpi_instance):
 
     print("Constructing class: adapter_shapeoptimizer")
 
     self.mpi_instance = mpi_instance
 
-    return    
+    # objective_functionをスレッドから同時に呼び出してよいことをオプティマイザへ示すフラグ
+    self.flag_parallel_evaluation = True
+    # 最大化の符号を自分で掛けることをオプティマイザへ示すフラグ（既知の問題 1）
+    self.flag_apply_sign = True
+
+    return
 
 
   def initial_settings(self, config):
@@ -32,11 +43,15 @@ class adapter_shapeoptimizer(orbital):
     self.case_dir   = config['shapeoptimizer']['case_dir']
     self.step_digit = config['shapeoptimizer']['step_digit']
 
+    if self.mpi_instance.flag_mpi:
+      print('[ShapeOpt-Borealis] Warning: Borealis is launched with MPI. External MPI codes may fail to start from MPI-launched processes.')
+      print('[ShapeOpt-Borealis] Warning: Launch Borealis without mpirun and use PSO.num_parallel for concurrent evaluations.')
+
     # Make directory
     if self.mpi_instance.rank == 0:
       super().make_directory_rm(self.work_dir)
 
-    # Template case 
+    # Template case
     path_specify = config['shapeoptimizer']['directory_path_specify']
     default_path = '../../shapeoptimizer'
     manual_path  = config['shapeoptimizer']['manual_path']
@@ -45,10 +60,6 @@ class adapter_shapeoptimizer(orbital):
     self.work_dir_template = self.work_dir+'/'+self.case_dir+'_template'
     if self.mpi_instance.rank == 0:
       shutil.copytree(self.template_path, self.work_dir_template)
-
-    # Control file and computed result file
-    #self.filename_control_code = config['shapeoptimizer']['filename_control']
-    #self.filename_result_code  = config['shapeoptimizer']['filename_result']
 
     # Execution file
     self.cmd_code = config['shapeoptimizer']['cmd_code']
@@ -62,44 +73,24 @@ class adapter_shapeoptimizer(orbital):
     if self.mpi_instance.rank == 0:
       super().make_directory_rm(config['shapeoptimizer']['result_dir'])
 
-    # Control file 
+    # Control file
     self.config = config
 
-    # Counter
+    # Counter (used only when the optimizer does not pass IDs, e.g. Bayesian optimization)
     self.step = 1
-
-    # Counter
     self.pid = 1
-
-    # Delete old file
-    self.filename_jobrequests = "job_requests"
-    #if self.mpi_instance.rank == 0:
-    #  if os.path.exists(self.filename_jobrequests):
-    #    try:
-    #      os.remove(self.filename_jobrequests)
-    #      print(f"{self.filename_jobrequests} has been deleted.")
-    #    except OSError as e:
-    #      print(f"Failed to delete {self.filename_jobrequests}: {e}", file=sys.stderr)
-    #      sys.exit(1)  # 終了コード1でスクリプト終了
-    #  else:
-    #    print(f"{self.filename_jobrequests} does not exist.")
+    self.lock_counter = threading.Lock()
 
     # 同期をとる
     if self.mpi_instance.flag_mpi:
       self.mpi_instance.comm.Barrier()
 
-    # For result data reading
-    #self.headerline_variables = 1
-    #self.num_skiprows = 2
-
     # Get number of dimension and check its consistency
     num_dims = []
     for param in self.parameter_target:
       component_list = param.get('component', [])
-      coordinate_list = param.get('coordinate', [])
       num_dim = len(component_list)
       num_dims.append(num_dim)
-      #print(f"{param['name']}: number of dimensions = {num_dim}")
     # 全て同じ次元かどうかをチェック
     all_same_dim = all(n == num_dims[0] for n in num_dims)
     if all_same_dim:
@@ -109,23 +100,15 @@ class adapter_shapeoptimizer(orbital):
       print(f"[ShapeOpt-Borealis] Number of dimensions of each element: {num_dims}")
       raise SystemExit()
     self.num_dim = num_dim
-    
+
     # Get number of boundary（= number of "name"
     num_marker = len(self.parameter_target)
     print(f"[ShapeOpt-Borealis] Number of markers: {num_marker}")
     self.num_marker = num_marker
 
-    # Set variables for optimization
-    self.displacements = np.zeros((self.num_marker,self.num_dim))
-    self.forces_marker = np.zeros(self.num_dim)
-    if self.num_dim == 2:
-      self.moments_marker = np.zeros(1)
-    else:
-      self.moments_marker = np.zeros(3)
-
     # 非定常空気力データを目的関数として時間経過とともに形状最適化を行う
     self.in_sequential = config['shapeoptimizer']['in_sequential']
-        
+
     # File names
     self.work_dir_series    = config['shapeoptimizer']['work_dir_series']
     self.forces_file        = config['shapeoptimizer']['filename_forces']
@@ -139,27 +122,58 @@ class adapter_shapeoptimizer(orbital):
       self.filename_surfacearea  = config.get('shapeoptimizer', {}).get('filename_surfacearea', 'surfacearea_su2.dat')
       self.tolerance_surfacearea = config.get('shapeoptimizer', {}).get('tolerance_surfacearea', 0.05)
 
-    if self.in_sequential :
-      # Caseディレクトリの作成
-      self.work_dir_case = self.work_dir + '/' + self.case_dir + '_rank' + str(self.mpi_instance.rank+1).zfill(self.step_digit)
-      print('[ShapeOpt-Borealis] --Make case directory: ', self.work_dir_case)
-      shutil.copytree(self.work_dir_template, self.work_dir_case)
-      # Set file names
-      self.filename_displacements_base = self.work_dir_case+'/'+self.work_dir_series+'/'+os.path.splitext(self.displacements_file)[0]
-      self.filename_displacements_ext  = os.path.splitext(self.displacements_file)[1]
-      self.filename_forces_base        = self.work_dir_case+'/'+self.work_dir_series+'/'+os.path.splitext(self.forces_file)[0]
-      self.filename_forces_ext         = os.path.splitext(self.forces_file)[1]
-      if self.flag_surfacearea_constraint:
-        self.filename_surfacearea_base = self.work_dir_case+'/'+self.work_dir_surfacearea+'/'+os.path.splitext(self.filename_surfacearea)[0]
-        self.filename_surfacearea_ext  = os.path.splitext(self.filename_surfacearea)[1]
+    # Parallel execution of external code
+    # 各ケースにCPUコアの組(slot)を割り当て、環境変数BOREALIS_CPU_SET/BOREALIS_NUM_CPU/BOREALIS_SLOTで実行スクリプトへ渡す
+    kind_optimizer = config['optimizer']['kind_optimizer']
+    num_parallel = int( config.get(kind_optimizer, {}).get('num_parallel', 1) )
+    self.num_cpu_per_case = int( config['shapeoptimizer'].get('num_cpu_per_case', 2) )
+    self.cpu_offset       = int( config['shapeoptimizer'].get('cpu_offset', 0) )
+    self.flag_cpu_set     = config['shapeoptimizer'].get('flag_cpu_set', True)
+    self.polling_interval = float( config['shapeoptimizer'].get('polling_interval', 3.0) )
+    self.timeout_finalize = float( config['shapeoptimizer'].get('timeout_finalize', 600.0) )
+    self.penalty_failure  = float( config['shapeoptimizer'].get('penalty_failure', 1.e+10) )
+    # コアの割り当て方。affinity: このプロセスに使うことが許されたコアの並び（ジョブスケジューラが割り当てたコア）から順に取る。
+    # absolute: 0 番からの絶対番号（以前の動き）。ジョブのコアが 0 番から始まらないと外れる（既知の問題 20）
+    self.cpu_assignment   = config['shapeoptimizer'].get('cpu_assignment', 'affinity')
+    if self.cpu_assignment not in ('affinity', 'absolute'):
+      raise ValueError(f"shapeoptimizer.cpu_assignment must be affinity or absolute: {self.cpu_assignment}")
+    try:
+      self.cpu_available = sorted( os.sched_getaffinity(0) )
+    except AttributeError:
+      # sched_getaffinity の無い OS（macOS など）
+      self.cpu_available = list( range(os.cpu_count()) )
 
-    # Delete old files if the files remain
-    #self.delete_step_files(forces_file, digit=self.step_digit_series, directory=self.work_dir_case+'/'+self.work_dir_series)
-    #self.delete_step_files(displacements_file, digit=self.step_digit_series, directory=self.work_dir_case+'/'+self.work_dir_series)
+    # 目的関数の値: 1 目的なら [抗力]、2 目的なら [抗力, モーメント]（以前は常に 2 つ返し、単目的で止まっていた。既知の問題 15）
+    self.num_objectives = int( config.get('objectives', {}).get('num_objectives', 1) )
+    if self.num_objectives not in (1, 2):
+      raise ValueError(f"shapeoptimizer supports objectives.num_objectives = 1 (drag) or 2 (drag and moment): {self.num_objectives}")
 
-    # Indexes and powers
-    #self.index_var_of = config['shapeoptimizer']['index_variable_objectivefunction']
-    #self.power_var_of = config['shapeoptimizer']['power_variable_objectivefunction']
+    if self.in_sequential:
+      # 逐次最適化では粒子ごとに連成計算が常駐するため、粒子番号をそのままslotとして使う
+      if kind_optimizer != 'PSO':
+        print('[ShapeOpt-Borealis] Error: in_sequential: True is supported only with PSO.')
+        raise SystemExit()
+      self.num_particle = int( config['PSO']['num_particle'] )
+      num_slot = self.num_particle
+      self.proc_sequential = {}
+    else:
+      num_slot = num_parallel
+      self.queue_slot = queue.Queue()
+      for n in range(0, num_slot):
+        self.queue_slot.put(n)
+
+    num_cpu_required = self.cpu_offset + num_slot * self.num_cpu_per_case
+    num_cpu_available = len(self.cpu_available) if self.cpu_assignment == 'affinity' else os.cpu_count()
+    print(f"[ShapeOpt-Borealis] Number of slots: {num_slot}, CPUs per case: {self.num_cpu_per_case}, CPUs required: {num_cpu_required}, "
+          f"CPU assignment: {self.cpu_assignment} ({num_cpu_available} CPUs available)")
+    if self.flag_cpu_set and num_cpu_required > num_cpu_available:
+      raise ValueError(f"[ShapeOpt-Borealis] CPUs required ({num_cpu_required}) exceed CPUs available ({num_cpu_available}). "
+                       "Reduce num_parallel or num_cpu_per_case, or request more cores for the job.")
+
+    # 終了時(正常終了・例外とも)に残っている外部コードのプロセスを停止する
+    self.procs_running = set()
+    self.lock_procs = threading.Lock()
+    atexit.register(self.terminate_subprocesses)
 
     return
 
@@ -199,7 +213,7 @@ class adapter_shapeoptimizer(orbital):
                 }
             data.append(d)
     return data
-  
+
   def write_displacements(self, filename, displacements):
     if not isinstance(displacements, np.ndarray):
         raise TypeError("[ShapeOpt-Borealis-ERROR] displacements must be a numpy ndarray.")
@@ -209,7 +223,6 @@ class adapter_shapeoptimizer(orbital):
         with open(filename, 'w') as f:
             for row in displacements:
                 f.write(' '.join(f"{val:.6e}" for val in row) + '\n')
-        #print(f"[Borealis-INFO] Displacements written to '{filename}'")
     except Exception as e:
         print(f"[ShapeOpt-Borealis-ERROR] Failed to write displacements to file: {e}")
 
@@ -228,7 +241,7 @@ class adapter_shapeoptimizer(orbital):
       return None, None
     try:
       with open(filename, 'r') as f:
-        lines = f.readlines()   
+        lines = f.readlines()
         # 1行目はヘッダー、2行目にデータがある前提
         if len(lines) >= 2:
           data_line = lines[1].strip()
@@ -236,7 +249,7 @@ class adapter_shapeoptimizer(orbital):
           # write側でカンマ区切りにした場合はこれで行けます
           parts = data_line.replace(',', ' ').split()
           area = float(parts[0])
-          area_init = float(parts[1])                
+          area_init = float(parts[1])
           return area, area_init
         else:
           print(f"Error: {filename} is empty or malformed.")
@@ -245,40 +258,68 @@ class adapter_shapeoptimizer(orbital):
       print(f"An error occurred while reading: {e}")
       return None, None
 
-  def write_request_instruction(self, filename):
-    print('[ShapeOpt-Borealis] Writing job requests file')
-    size = self.mpi_instance.size # 並列数
-    filename_request_instruction = filename
-    with open(filename_request_instruction, "w") as f:
-      f.write("Directories for subprocesses:\n")
-      for n in range(0,size):
-        work_dir_case_rank = self.work_dir + '/' + self.case_dir + '_rank' + str(n+1).zfill(self.step_digit)
-        f.write(f"{work_dir_case_rank}\n")
 
-  def write_request_instruction_para(self, filename, pid):
-    comm = self.mpi_instance.comm
-    rank = self.mpi_instance.rank
-    # 各ランクが自分のディレクトリを作る
-    work_dir_case_rank = self.work_dir + '/' + self.case_dir + '_rank' + str(pid).zfill(self.step_digit) 
-    # rank 0 に集約
-    all_dirs = comm.gather(work_dir_case_rank, root=0)
-    # rank 0 だけ書き込み
-    if rank == 0:
-        str_tmp = "Directories for subprocesses:\n"
-        for d in all_dirs:
-            str_tmp = str_tmp + f"{d}\n"
-        print('[ShapeOpt-Borealis] Writing job requests file by rank0', rank, 'Strings in file:')
-        print(str_tmp)
-        with open(filename, "w") as f:
-            f.write(str_tmp)
+  def get_subprocess_env(self, slot):
+    # os.environはPython起動時のスナップショットであり、mpi4pyのimport(MPI_Init)時にC側で追加されるOMPI_*/PMIX_*等を含まない。
+    # env=Noneのままだとそれらが子プロセスに継承され、子プロセス側のmpirunが失敗する
+    env = dict(os.environ)
+    env['BOREALIS_SLOT']    = str(slot)
+    env['BOREALIS_NUM_CPU'] = str(self.num_cpu_per_case)
+    if self.flag_cpu_set:
+      cpu_start = self.cpu_offset + slot * self.num_cpu_per_case
+      if self.cpu_assignment == 'affinity':
+        cpu_list = self.cpu_available[cpu_start : cpu_start + self.num_cpu_per_case]
+      else:
+        cpu_list = range(cpu_start, cpu_start + self.num_cpu_per_case)
+      env['BOREALIS_CPU_SET'] = ','.join( str(c) for c in cpu_list )
+    return env
 
-  def run_subprocess(self):
-    print('[ShapeOpt-Borealis] Run subprocess')
-    os.chdir( self.work_dir_case )
-    #subprocess.call( "./run_SU2-OPT_pps.sh" )
-    proc = subprocess.Popen(["./run_SU2-OPT_pps.sh"])
-    os.chdir( self.root_dir )
+
+  def run_code(self, work_dir_case, slot):
+    print(f'[ShapeOpt-Borealis] Run subprocess: {work_dir_case}, slot: {slot}')
+    env = self.get_subprocess_env(slot)
+    # start_new_session: 実行スクリプトが起動するmpirun等をプロセスグループごと停止できるようにする
+    with open(work_dir_case + '/log_subprocess', 'w') as file_log:
+      proc = subprocess.Popen( [self.cmd_code], cwd=work_dir_case, env=env, stdout=file_log, stderr=subprocess.STDOUT, start_new_session=True )
+    with self.lock_procs:
+      self.procs_running.add(proc)
     return proc
+
+
+  def kill_subprocess(self, proc):
+    # 実行スクリプト自体が終了していても、取り残された子プロセス(mpirun等)があればまとめて停止する
+    try:
+      os.killpg(proc.pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+      pass
+    proc.poll()
+    with self.lock_procs:
+      self.procs_running.discard(proc)
+
+
+  def terminate_subprocesses(self):
+    with self.lock_procs:
+      procs = list(self.procs_running)
+    for proc in procs:
+      self.kill_subprocess(proc)
+
+
+  def wait_file(self, filename, proc):
+    # 外部コードの出力ファイルを待つ。ファイルが出る前にプロセスが終了した場合は失敗とする
+    while not os.path.exists(filename):
+      if proc.poll() is not None:
+        return os.path.exists(filename)
+      time.sleep(self.polling_interval)
+    return True
+
+
+  def wait_subprocess(self, proc, work_dir_case):
+    # 次のケースが同じCPUコアを使うため、slotを返す前に終了を待つ
+    try:
+      proc.wait(timeout=self.timeout_finalize)
+    except subprocess.TimeoutExpired:
+      print(f'[ShapeOpt-Borealis] Warning: Subprocess did not finish within {self.timeout_finalize} s and was killed: {work_dir_case}')
+    self.kill_subprocess(proc)
 
 
   def objective_function(self, parameter_opt, *args):
@@ -287,8 +328,11 @@ class adapter_shapeoptimizer(orbital):
     # args[1]: 最適化ステップ
     # args[2]: 目的関数を最大化するか最小化するか
     if not args:
-      pid  = self.pid
-      step = self.step
+      with self.lock_counter:
+        pid  = self.pid
+        step = self.step
+        self.pid  += 1
+        self.step += 1
       sign_of = 1.0
     else:
       pid = args[0]
@@ -297,58 +341,64 @@ class adapter_shapeoptimizer(orbital):
 
     print('[ShapeOpt-Borealis] Iteration: ', pid)
 
-    # File names
+    # Case directory and file names
     if self.in_sequential:
-      step_str = f"{step:0{self.step_digit_series}d}"
-      filename_displacements_series = f"{self.filename_displacements_base}_step{step_str}{self.filename_displacements_ext}"
-      filename_forces_series = f"{self.filename_forces_base}_step{step_str}{self.filename_forces_ext}"
-      if self.flag_surfacearea_constraint:
-        filename_surfacearea_series = f"{self.filename_surfacearea_base}_step{step_str}{self.filename_surfacearea_ext}"
-    else :
-      # Caseディレクトリの作成
+      # 粒子ごとの常駐ケース。ステップごとにファイル名の末尾を変える
+      slot = (pid - 1) % self.num_particle
+      work_dir_case = self.work_dir + '/' + self.case_dir + '_rank' + str(slot+1).zfill(self.step_digit)
+      suffix_series = f"_step{step:0{self.step_digit_series}d}"
+      if step == 0:
+        print('[ShapeOpt-Borealis] --Make case directory: ', work_dir_case)
+        shutil.copytree(self.work_dir_template, work_dir_case)
+    else:
       work_dir_case = self.work_dir + '/' + self.case_dir + '_rank' + str(pid).zfill(self.step_digit)
+      suffix_series = ''
       print('[ShapeOpt-Borealis] --Make case directory: ', work_dir_case)
-      shutil.copytree(self.work_dir_template, work_dir_case) 
-      filename_displacements_base = work_dir_case+'/'+self.work_dir_series+'/'+os.path.splitext(self.displacements_file)[0]
-      filename_displacements_ext  = os.path.splitext(self.displacements_file)[1]
-      filename_displacements_series = f"{filename_displacements_base}{filename_displacements_ext}"
-      filename_forces_base        = work_dir_case+'/'+self.work_dir_series+'/'+os.path.splitext(self.forces_file)[0]
-      filename_forces_ext         = os.path.splitext(self.forces_file)[1]
-      filename_forces_series = f"{filename_forces_base}{filename_forces_ext}"
-      if self.flag_surfacearea_constraint:
-        filename_surfacearea_base   = work_dir_case+'/'+self.work_dir_surfacearea+'/'+os.path.splitext(self.filename_surfacearea)[0]
-        filename_surfacearea_ext    = os.path.splitext(self.filename_surfacearea)[1]
-        filename_surfacearea_series = f"{filename_surfacearea_base}{filename_surfacearea_ext}"
+      shutil.copytree(self.work_dir_template, work_dir_case)
 
-    # Write displacements file
-    self.displacements = parameter_opt.reshape(self.num_marker, self.num_dim)
-    self.write_displacements(filename_displacements_series, self.displacements)
-    print(f"[ShapeOpt-Borealis] PID {pid} and Step {step+1}: Wrote {filename_displacements_series}\n", f"Displacements: {self.displacements[1,:]}..{self.displacements[-1,:]}")
+    filename_displacements_series = self.get_filename_series(work_dir_case, self.work_dir_series, self.displacements_file, suffix_series)
+    filename_forces_series        = self.get_filename_series(work_dir_case, self.work_dir_series, self.forces_file, suffix_series)
+    if self.flag_surfacearea_constraint:
+      filename_surfacearea_series = self.get_filename_series(work_dir_case, self.work_dir_surfacearea, self.filename_surfacearea, suffix_series)
 
-    # 形状最適化(shapeoptimizer_preCICE)サブプロセスの起動指示ファイルを生成
-    # ->中間スクリプトがこれを検知して形状最適化を実行する（親プロセスをMPIで起動したとき、親プロセスが子プロセスをMPIで起動できない仕様上このような措置を図る）
+    # Write displacements file (shapeoptimizer_preCICEは起動直後に読み込むため、起動前に書く)
+    displacements = parameter_opt.reshape(self.num_marker, self.num_dim)
+    self.write_displacements(filename_displacements_series, displacements)
+    print(f"[ShapeOpt-Borealis] PID {pid} and Step {step+1}: Wrote {filename_displacements_series}\n", f"Displacements: {displacements[1,:]}..{displacements[-1,:]}")
+
+    # Run external code and get forces data
     if self.in_sequential:
       if step == 0:
-        if self.mpi_instance.rank == 0:
-          self.write_request_instruction(self.filename_jobrequests)
+        self.proc_sequential[slot] = self.run_code(work_dir_case, slot)
+      proc = self.proc_sequential[slot]
+      flag_success = self.wait_file(filename_forces_series, proc)
+      if flag_success:
+        # 常駐プロセスが書き込み中の可能性があるため、読めるまで再試行する
+        for n in range(0, 10):
+          try:
+            forces_marker, moments_marker = self.read_forces_marker(filename_forces_series)
+            break
+          except (IndexError, ValueError):
+            time.sleep(0.5)
+        else:
+          flag_success = False
     else:
-      self.write_request_instruction_para(self.filename_jobrequests, pid)
-      
-    if self.mpi_instance.flag_mpi:
-      self.mpi_instance.comm.Barrier()
+      slot = self.queue_slot.get()
+      try:
+        proc = self.run_code(work_dir_case, slot)
+        flag_success = self.wait_file(filename_forces_series, proc)
+        self.wait_subprocess(proc, work_dir_case)
+      finally:
+        self.queue_slot.put(slot)
+      if flag_success:
+        forces_marker, moments_marker = self.read_forces_marker(filename_forces_series)
 
-    # Get forces data
-    while not os.path.exists(filename_forces_series):
-      time.sleep(3.0)
-    self.forces_marker, self.moments_marker = self.read_forces_marker(filename_forces_series)
-    print(f"[ShapeOpt-Borealis] PID {pid} and Step {step+1}: Read {filename_forces_series}\n", f"Forces and Moments: {self.forces_marker} {self.moments_marker} ")
+    if not flag_success:
+      print(f"[ShapeOpt-Borealis] Error: PID {pid} and Step {step+1}: {filename_forces_series} was not obtained. See {work_dir_case}/log_subprocess")
+      return np.full(self.num_objectives, self.penalty_failure)
+    print(f"[ShapeOpt-Borealis] PID {pid} and Step {step+1}: Read {filename_forces_series}\n", f"Forces and Moments: {forces_marker} {moments_marker} ")
 
     # Penalty
-    #penalty = 0.0
-    #if self.config['parameter_optimized']['flag_penalty']:
-    #  boundary = self.config['parameter_optimized']['boundary']
-    #  huge_tmp = self.config['parameter_optimized']['penalty_value']
-    #  penalty = super().get_penalty_term(parameter_opt, boundary, huge_tmp)
     if self.config['parameter_optimized']['flag_penalty']:
       boundary  = self.config['parameter_optimized']['boundary']
       huge_tmp  = self.config['parameter_optimized']['penalty_value']
@@ -370,12 +420,13 @@ class adapter_shapeoptimizer(orbital):
         penalty = penalty + self.config['shapeoptimizer']['penalty_surfacearea']
 
     # Evaluate error
-    error = sign_of * np.array([ self.forces_marker[0], self.moments_marker[0] ]) + penalty
-    error = sign_of * np.array([ self.forces_marker[0], self.moments_marker[0] ]) + penalty
-
-    # カウンタの更新
-    if not args:
-      self.pid  += 1
-      self.step += 1
+    if np.ndim(penalty) > 0:
+      penalty = np.asarray(penalty)[:self.num_objectives]
+    error = sign_of * np.array([ forces_marker[0], moments_marker[0] ])[:self.num_objectives] + penalty
 
     return np.atleast_1d(error).astype(float)
+
+
+  def get_filename_series(self, work_dir_case, sub_dir, filename, suffix):
+    base, ext = os.path.splitext(filename)
+    return f"{work_dir_case}/{sub_dir}/{base}{suffix}{ext}"

@@ -83,6 +83,9 @@ PSO: # Particle swarm optimization
   # Number of particles
   num_particle: 6
 
+  # Number of concurrent evaluations (thread-based; Borealis itself is launched without mpirun)
+  num_parallel: 6
+
   # Minimize or maximize the objective function
   maximize: False
 
@@ -123,6 +126,15 @@ shapeoptimizer:
 
   # Executing script
   cmd_code: ./run_SU2-OPT_pps.sh
+
+  # Parallel execution of external code (cases run concurrently up to PSO.num_parallel)
+  # 各ケースにコア番号 cpu_offset + slot*num_cpu_per_case 以降を割り当て、BOREALIS_CPU_SET/BOREALIS_NUM_CPUとしてcmd_codeへ渡す
+  num_cpu_per_case: 2
+  cpu_offset: 0
+  flag_cpu_set: True
+  polling_interval: 3.0     # 結果ファイルの確認間隔[s]
+  timeout_finalize: 600.0   # 結果ファイル出力後、cmd_codeの終了を待つ最大時間[s]
+  penalty_failure: 1.e+10   # 結果ファイルが得られなかったケースの目的関数値
   
   # Sequential optimization
   in_sequential: False

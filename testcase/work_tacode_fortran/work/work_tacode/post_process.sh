@@ -1,7 +1,9 @@
 #!/bin/bash
 
 source $HOME/venvs/myenv/bin/activate
-source $HOME/.dir_opt_bashrc/.bashrc_precice-v320_borealis
+source ${HOME}/.dir_opt_bashrc/.bashrc_precice-v320
+source ${HOME}/.dir_opt_bashrc/.bashrc_precice-v320_su2
+source ${HOME}/.dir_opt_bashrc/.bashrc_precice-v320_borealis
 
 PYTHON=python3
 LD_DIR=$HOME_BORE/src_helper

@@ -171,12 +171,8 @@ class adapter_cage(orbital):
     
     print('--Run external code')
 
-    # Move to computing directory, run Tacode, and return to the original directory
-    os.chdir( self.work_dir_case )
-    subprocess.call( self.cmd_code )
-    os.chdir( self.root_dir )
-
-    return
+    # 終了ステータスと結果ファイルを確かめる（既知の問題 7）。子には MPI の環境変数を渡さない（既知の問題 19）
+    return super().run_external_code( self.cmd_code, self.work_dir_case, self.filename_result_code )
 
 
   @orbital.time_measurement_decorated
@@ -308,7 +304,11 @@ class adapter_cage(orbital):
     self.rewrite_control_file_code(parameter_opt)
 
     # Run Tacode
-    self.run_code()
+    flag_success = self.run_code()
+    if not flag_success:
+      if not args:
+        self.iter += 1
+      return np.atleast_1d(np.inf)
 
     # Read result for evaluating error
     result_dict = self.read_result_data()

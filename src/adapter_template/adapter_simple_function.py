@@ -12,6 +12,10 @@ class adapter_simple_function(orbital):
 
     self.mpi_instance = mpi_instance
 
+    # 最大化の符号を自分で掛ける（既知の問題 1）。状態を持たないのでスレッドから同時に呼んでよい
+    self.flag_apply_sign = True
+    self.flag_parallel_evaluation = True
+
     return
 
   
@@ -89,13 +93,15 @@ class adapter_simple_function(orbital):
   def objective_function(self, parameter_opt, *args):
 
     if args: self.iter = args[0]
+    # 最大化の符号（PSO・ABC が第 4 引数で渡す）
+    sign_of = args[2] if len(args) > 2 else 1.0
 
     #print('Iteration: ', self.iter)
 
     x = np.asarray(parameter_opt)
 
     # Function
-    result = self.function(x)
+    result = sign_of * self.function(x)
 
     if not args: self.iter += 1
 

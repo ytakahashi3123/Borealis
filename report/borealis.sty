@@ -1,0 +1,110 @@
+% ---------------------------------------------------------------------------
+% borealis.sty --- Borealis の詳細レポート (日英) で共通に使う設定
+%
+% 日英の 2 つの文書は同じ構成・同じ数値で保つ約束なので、体裁もここに集めてある。
+% 言語ごとに違うのは表題と、和文のためのクラスだけで、それは各 .tex の側に置く。
+%
+% **エンジンは 2 つある。** 英語版は pdflatex、日本語版は platex + dvipdfmx で組む
+% (jsarticle)。フォントを決め打ちしないので、macOS でも Linux でも同じように出る。
+% 日本語版は \usepackage[dvipdfmx]{borealis} として読むこと。ドライバの指定が要る
+% graphicx・xcolor・hyperref に、そのまま渡している。
+% ---------------------------------------------------------------------------
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{borealis}[2026/10/19 Borealis report style (after orthrus.sty)]
+
+\newif\if@borealis@dvipdfmx
+\DeclareOption{dvipdfmx}{\@borealis@dvipdfmxtrue}
+\ProcessOptions\relax
+
+\RequirePackage[a4paper,margin=25mm]{geometry}
+\RequirePackage{amsmath}
+\RequirePackage{amssymb}
+\RequirePackage{bm}
+\RequirePackage{array}
+\RequirePackage{booktabs}
+\RequirePackage{tabularx}
+\RequirePackage{fancyvrb}
+% 長い識別子 (\texttt{...}) を含む段落がはみ出さないように、少しだけ伸縮を許す
+\setlength{\emergencystretch}{3em}
+
+% ドライバごとに分かれるもの。microtype と inputenc/fontenc は pdflatex のときだけ
+\if@borealis@dvipdfmx
+  \RequirePackage[dvipdfmx]{graphicx}
+\else
+  \RequirePackage[utf8]{inputenc}
+  \RequirePackage[T1]{fontenc}
+  \RequirePackage{graphicx}
+  \RequirePackage{microtype}
+\fi
+
+% 図は figure/ にある
+\graphicspath{{figure/}{./}}
+
+% 表: 行間を少し空ける。数値の並ぶ表が多いので詰まって見えないように
+\renewcommand{\arraystretch}{1.15}
+\setlength{\tabcolsep}{5pt}
+
+% 箇条書き: 項目の間を空けない (もとの Markdown の見た目に近づける)
+\RequirePackage{enumitem}
+\setlist{itemsep=0.15em,parsep=0pt,topsep=0.4em}
+
+% コード片。\texttt{} の中の下線やアンダースコアはエスケープしてある
+\if@borealis@dvipdfmx
+  \RequirePackage[dvipdfmx]{xcolor}
+\else
+  \RequirePackage{xcolor}
+\fi
+\definecolor{codebg}{gray}{0.96}
+\fvset{frame=none,fontsize=\small,xleftmargin=1em}
+
+% 見出しはクラス（jsarticle・article）の標準のまま。目次は節だけの 1 段
+\setcounter{tocdepth}{1}
+% jsarticle は段落の小見出し（\paragraph）の頭に「■」を付ける。付けない（論文の体裁）
+\@ifundefined{jsParagraphMark}{}{\renewcommand{\jsParagraphMark}{}}
+
+% 柱：左に短い表題、右にページ番号、下に罫線（論文の体裁）
+\RequirePackage{fancyhdr}
+\newcommand{\runninghead}[1]{\gdef\@runninghead{#1}}
+\gdef\@runninghead{Borealis}
+\pagestyle{fancy}
+\setlength{\headheight}{16pt}
+\fancyhf{}
+\lhead{\small\@runninghead}
+\rhead{\small\thepage}
+\fancypagestyle{plain}{\fancyhf{}\lhead{\small\@runninghead}\rhead{\small\thepage}}
+
+% hyperref は最後に読む。ドライバの指定が要る
+\if@borealis@dvipdfmx
+  \RequirePackage[dvipdfmx,hidelinks]{hyperref}
+\else
+  \RequirePackage[hidelinks]{hyperref}
+\fi
+
+% 表題。扉のページは作らず、1 ページ目に表題・副題・著者・所属・日付と、小さな字の概要を置く（論文の体裁）
+\newcommand{\subtitle}[1]{\gdef\@subtitle{#1}}
+\gdef\@subtitle{}
+\newcommand{\affiliation}[1]{\gdef\@affiliation{#1}}
+\gdef\@affiliation{}
+\newcommand{\abstractname@borealis}{Abstract}
+\newcommand{\setabstractname}[1]{\renewcommand{\abstractname@borealis}{#1}}
+\renewcommand{\maketitle}{%
+  \begin{center}
+    {\LARGE\bfseries \@title \par}
+    \vspace{0.6em}
+    {\large \@subtitle \par}
+    \vspace{1.0em}
+    {\normalsize \@author \par}
+    \ifx\@affiliation\@empty\else{\small\itshape \@affiliation \par}\fi
+    \vspace{0.3em}
+    {\small \@date \par}
+  \end{center}%
+  \thispagestyle{fancy}%
+}
+% 概要：表題の下に小さな字で
+\newenvironment{borealisabstract}{%
+  \par\vspace{0.8em}\noindent\small\textbf{\abstractname@borealis}\quad\ignorespaces
+}{%
+  \par\vspace{0.8em}\normalsize
+}
+
+\endinput

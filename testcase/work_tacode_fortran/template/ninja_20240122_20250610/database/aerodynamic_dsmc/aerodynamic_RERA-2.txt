@@ -1,5 +1,0 @@
-EGG aerodynamic data (DSMC+CFD) 
-variables = Kn, CFx, CFy, CFz, CMx, CMy, CMz, SDV_CFx, SDV_CFy, SDV_CFz, SDV_CMx, SDV_CMy, SDV_CMz, Altitude 
-AOA 0
-0	1	0	0	0	0	0	0	0	0	0	0	0	0
-0	1	0	0	0	0	0	0	0	0	0	0	0	100

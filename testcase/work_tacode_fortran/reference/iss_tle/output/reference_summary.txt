@@ -1,0 +1,15 @@
+ISS (ZARYA)
+1 25544U 98067A   26234.50053383  .00009133  00000+0  17025-3 0  9997
+2 25544  51.6331 331.8814 0007668  72.6488 287.5339 15.49570248582031
+
+day_of_year_start (target_time) : 233.5005338299
+day_of_year_end                 : 233.5653486447
+time_abs_sec_start              : 20119363.090992
+time_abs_sec_end                : 20124963.090992
+initial coord_longitude [deg]   : -179.1208113957
+initial coord_latitude  [deg]   : 0.0000170734
+initial coord_altitude  [m]     : 417156.541931
+initial velocity v_east  [m/s]  : 4258.762704
+initial velocity v_north [m/s]  : 6009.832762
+initial velocity v_up    [m/s]  : -12.211875
+altitude min/max [km]           : 414.721406 / 440.772123

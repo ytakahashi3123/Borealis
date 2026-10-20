@@ -1,6 +1,19 @@
 #!/usr/bin/env python3
 
+# 遺伝的アルゴリズム (GA)。実数値の GA を NSGA-II の世代交代で回す。
+#   - 選択: 2 個体のトーナメント（非劣解の順位、同じなら混雑距離の大きいほう）
+#   - 交叉: SBX (simulated binary crossover; Deb and Agrawal, 1995)
+#   - 突然変異: 多項式突然変異 (polynomial mutation; Deb and Goyal, 1996)
+#   - 世代交代: 親と子を合わせた 2N 個から、非劣解の順位と混雑距離で N 個を残す (NSGA-II; Deb et al., 2002)
+# 単目的では、これは最良の個体が必ず残る (mu + lambda) のエリート保存の GA になる。
+# 1 世代に評価するのは子の N 個だけ（親の値は持ち越す）。
+#
+# MPI では、遺伝的な操作は rank 0 だけが行って全ランクに配り、評価だけを分担する
+# （ランクごとに乱数の種が違っても、全ランクの集団が一致するように）。
+# 1.6 までの GA は試作のまま borealis.py で外してあった。これはそれを置き換えたもの。
+
 import numpy as np
+from concurrent.futures import ThreadPoolExecutor
 from orbital.orbital import orbital
 
 
@@ -12,11 +25,15 @@ class optimizer_ga(orbital):
 
     self.mpi_instance = mpi_instance
 
-    self.str_num_generation = 'number_generationn'
+    self.str_num_generation = 'number_generation'
     self.str_residual       = 'residual'
     self.str_population     = 'population'
     self.str_error          = 'solution'
-    self.str_best_index     = 'best_index'
+    self.str_id             = 'id'
+    self.str_rank           = 'rank'
+    self.str_front_id       = 'front_id'
+    self.str_front_position = 'front_position'
+    self.str_front_score    = 'front_score'
 
     self.text_color = '\033[96m'
     self.text_end = '\033[0m'
@@ -33,15 +50,13 @@ class optimizer_ga(orbital):
       self.mpi_instance.comm.Barrier()
 
     boundary = config['parameter_optimized']['boundary']
-    num_dimension = 0
     parameter_name_list = []
     for n in range(0, len(boundary) ):
       parameter_component = boundary[n]['component']
       for m in range(0, len(parameter_component)):
         parameter_name_list.append( parameter_component[m]['type'] )
-        num_dimension = num_dimension + 1
 
-    self.num_dimension = num_dimension
+    self.num_dimension = len(parameter_name_list)
     self.parameter_name_list = parameter_name_list
 
     return
@@ -50,7 +65,6 @@ class optimizer_ga(orbital):
   def boundary_setting(self, config):
 
     # Setting parameter's boundaries
-
     boundary = config['parameter_optimized']['boundary']
     parameter_boundary = []
     for n in range(0, len(boundary) ):
@@ -61,227 +75,377 @@ class optimizer_ga(orbital):
     return parameter_boundary
 
 
-  def generate_population(self, parameter_boundary):
-    population = np.array( [np.random.uniform(low=bound_low, high=bound_high) for bound_low, bound_high in parameter_boundary] )
-    return population
+  # ---------------------------------------------------------------------------
+  # NSGA-II の道具
+  # ---------------------------------------------------------------------------
+  def dominates(self, a, b):
+    return np.all(a <= b) and np.any(a < b)
 
 
-  def is_odd(self, i):
-    return i % 2 != 0
+  def non_dominated_sort(self, scores):
+    # 非劣解の順位（0 が第 1 フロント）。高速な非劣解ソート (Deb et al., 2002)
+    num = len(scores)
+    dominated_by = [ [] for _ in range(num) ]
+    count_dominating = np.zeros(num, dtype=int)
+    rank = np.zeros(num, dtype=int)
+    front = []
+    for p in range(num):
+      for q in range(num):
+        if p == q:
+          continue
+        if self.dominates(scores[p], scores[q]):
+          dominated_by[p].append(q)
+        elif self.dominates(scores[q], scores[p]):
+          count_dominating[p] += 1
+      if count_dominating[p] == 0:
+        front.append(p)
+    level = 0
+    while front:
+      next_front = []
+      for p in front:
+        rank[p] = level
+        for q in dominated_by[p]:
+          count_dominating[q] -= 1
+          if count_dominating[q] == 0:
+            next_front.append(q)
+      level += 1
+      front = next_front
+    return rank
 
 
-  #def fitness_function(self, position):
-  #  return objective_function(position)
+  def crowding_distance(self, scores, rank):
+    # 同じフロントの中での混雑距離。端の個体は無限大
+    scores = np.asarray(scores)
+    distance = np.zeros(len(scores))
+    for level in np.unique(rank):
+      index = np.where(rank == level)[0]
+      if len(index) <= 2:
+        distance[index] = np.inf
+        continue
+      for m in range(scores.shape[1]):
+        order = index[ np.argsort(scores[index, m], kind='stable') ]
+        distance[order[0]] = np.inf
+        distance[order[-1]] = np.inf
+        f_range = scores[order[-1], m] - scores[order[0], m]
+        if f_range < 1.0e-15:
+          continue
+        distance[order[1:-1]] += (scores[order[2:], m] - scores[order[:-2], m]) / f_range
+    return distance
 
 
-  def reshape_array(self, var, num_dim):
-    #下記のreshape追加の理由、Bayesian　Optの引数が(1,dim)の次元になるので、それに合わせている。
-    return var.reshape(1,num_dim)
+  def environmental_selection(self, scores, num_select):
+    # 順位の小さい順、同じ順位では混雑距離の大きい順に num_select 個を選ぶ
+    rank = self.non_dominated_sort(scores)
+    distance = self.crowding_distance(scores, rank)
+    order = np.lexsort( (-distance, rank) )
+    return order[:num_select]
 
 
-  def run_optimizer_ga(self, config, fitness_function, parameter_boundary):
+  def tournament(self, rank, distance, tournament_size):
+    candidate = np.random.choice(len(rank), size=tournament_size, replace=False)
+    best = candidate[0]
+    for c in candidate[1:]:
+      if rank[c] < rank[best] or (rank[c] == rank[best] and distance[c] > distance[best]):
+        best = c
+    return best
 
-    # Number of iteration
-    num_generation = config['GA']['num_generation']
-    # Number of population
-    num_population = config['GA']['num_population']
-    # Rate of mutation
-    mutation_rate = config['GA']['mutation_rate']
-    # Limit of mutation
-    mutation_limit = config['GA']['mutation_limit']
-    # Number of dimensions
+
+  # ---------------------------------------------------------------------------
+  # 実数値の交叉と突然変異（範囲つき）
+  # ---------------------------------------------------------------------------
+  def crossover_sbx(self, parent1, parent2, lower, upper, eta):
+    # SBX: 成分ごとに確率 0.5 で、親の広がりに応じた分布から子を作る（範囲つきの形）
+    child1 = parent1.copy()
+    child2 = parent2.copy()
+    for k in range(len(parent1)):
+      if np.random.rand() > 0.5 or abs(parent1[k] - parent2[k]) < 1.0e-14:
+        continue
+      y1, y2 = min(parent1[k], parent2[k]), max(parent1[k], parent2[k])
+      yl, yu = lower[k], upper[k]
+      rand = np.random.rand()
+      beta = 1.0 + 2.0*(y1 - yl)/(y2 - y1)
+      alpha = 2.0 - beta**(-(eta + 1.0))
+      betaq = (rand*alpha)**(1.0/(eta + 1.0)) if rand <= 1.0/alpha else (1.0/(2.0 - rand*alpha))**(1.0/(eta + 1.0))
+      c1 = 0.5*((y1 + y2) - betaq*(y2 - y1))
+      beta = 1.0 + 2.0*(yu - y2)/(y2 - y1)
+      alpha = 2.0 - beta**(-(eta + 1.0))
+      betaq = (rand*alpha)**(1.0/(eta + 1.0)) if rand <= 1.0/alpha else (1.0/(2.0 - rand*alpha))**(1.0/(eta + 1.0))
+      c2 = 0.5*((y1 + y2) + betaq*(y2 - y1))
+      c1 = min(max(c1, yl), yu)
+      c2 = min(max(c2, yl), yu)
+      if np.random.rand() <= 0.5:
+        c1, c2 = c2, c1
+      child1[k], child2[k] = c1, c2
+    return child1, child2
+
+
+  def mutation_polynomial(self, individual, lower, upper, rate, eta):
+    # 多項式突然変異: 成分ごとに確率 rate で、範囲の内側に少しずらす
+    child = individual.copy()
+    for k in range(len(child)):
+      if np.random.rand() >= rate:
+        continue
+      y, yl, yu = child[k], lower[k], upper[k]
+      if yu - yl <= 0.0:
+        continue
+      delta1 = (y - yl)/(yu - yl)
+      delta2 = (yu - y)/(yu - yl)
+      rand = np.random.rand()
+      power = 1.0/(eta + 1.0)
+      if rand < 0.5:
+        value = 2.0*rand + (1.0 - 2.0*rand)*(1.0 - delta1)**(eta + 1.0)
+        deltaq = value**power - 1.0
+      else:
+        value = 2.0*(1.0 - rand) + 2.0*(rand - 0.5)*(1.0 - delta2)**(eta + 1.0)
+        deltaq = 1.0 - value**power
+      child[k] = min(max(y + deltaq*(yu - yl), yl), yu)
+    return child
+
+
+  def make_offspring(self, population, scores, num_offspring, lower, upper, setting):
+    rank = self.non_dominated_sort(scores)
+    distance = self.crowding_distance(scores, rank)
+    offspring = []
+    while len(offspring) < num_offspring:
+      parent1 = population[ self.tournament(rank, distance, setting['tournament_size']) ]
+      parent2 = population[ self.tournament(rank, distance, setting['tournament_size']) ]
+      if np.random.rand() < setting['crossover_rate']:
+        child1, child2 = self.crossover_sbx(parent1, parent2, lower, upper, setting['eta_crossover'])
+      else:
+        child1, child2 = parent1.copy(), parent2.copy()
+      offspring.append( self.mutation_polynomial(child1, lower, upper, setting['mutation_rate'], setting['eta_mutation']) )
+      offspring.append( self.mutation_polynomial(child2, lower, upper, setting['mutation_rate'], setting['eta_mutation']) )
+    return np.array(offspring[:num_offspring])
+
+
+  # ---------------------------------------------------------------------------
+  # 本体
+  # ---------------------------------------------------------------------------
+  def run_optimizer_ga(self, config, objective_function, parameter_boundary):
+
+    setting_ga = config['GA']
+    num_objectives = config.get('objectives', {}).get('num_objectives', 1)
+    num_generation = int( setting_ga['num_generation'] )
+    num_population = int( setting_ga['num_population'] )
     num_dimension = self.num_dimension
-    # Acture number of iteration after optimization
+    if num_population < 4:
+      super().stop_program('[GA-Borealis] Error: GA.num_population must be 4 or more', self.mpi_instance)
+
+    setting = {
+      'tournament_size': int( setting_ga.get('tournament_size', 2) ),
+      'crossover_rate':  float( setting_ga.get('crossover_rate', 0.9) ),
+      'eta_crossover':   float( setting_ga.get('eta_crossover', 15.0) ),
+      'mutation_rate':   float( setting_ga.get('mutation_rate', 1.0/num_dimension) ),
+      'eta_mutation':    float( setting_ga.get('eta_mutation', 20.0) ),
+    }
+    windowsize_residual = int( setting_ga.get('windowsize_residual', 20) )
+    tolerance_residual  = float( setting_ga.get('tolerance_residual', 1.0e-5) )
+
+    # Maximization or minimization of the objective function (PSO と同じ仕組み。符号を掛けるのはアダプタ)
+    flag_maximize = setting_ga.get('maximize', False)
+    if isinstance(flag_maximize, list):
+      if len(flag_maximize) != num_objectives:
+        raise ValueError(f"[GA-Borealis] Error: GA.maximize has {len(flag_maximize)} entries, but objectives.num_objectives is {num_objectives}")
+      sign_of = np.array([-1.0 if f else 1.0 for f in flag_maximize])
+    elif isinstance(flag_maximize, bool):
+      sign_of = -1.0 if flag_maximize else 1.0
+    else:
+      raise ValueError("[GA-Borealis] Error: config['GA']['maximize'] must be True/False or a list.")
+    super().check_maximize_supported(objective_function, flag_maximize, 'GA', self.mpi_instance)
+    value_nonfinite = float( config['parameter_optimized'].get('value_nonfinite', 1.0e+30) )
+
+    lower = np.array([ b[0] for b in parameter_boundary ], dtype=float)
+    upper = np.array([ b[1] for b in parameter_boundary ], dtype=float)
+
+    # MPI と並列評価
+    flag_mpi = self.mpi_instance.flag_mpi
+    rank_mpi = self.mpi_instance.rank
+    if flag_mpi:
+      comm = self.mpi_instance.comm
+      size = self.mpi_instance.size
+      if num_population < size:
+        super().stop_program(f'[GA-Borealis] Error: GA.num_population ({num_population}) is smaller than the number of processes ({size})', self.mpi_instance)
+      indices_per_proc = np.array_split( np.arange(num_population), size )
+      my_indices = indices_per_proc[rank_mpi]
+    else:
+      my_indices = np.arange(num_population)
+
+    num_parallel = int( setting_ga.get('num_parallel', 1) )
+    if num_parallel > 1:
+      adapter_instance = getattr(objective_function, '__self__', None)
+      if not getattr(adapter_instance, 'flag_parallel_evaluation', False):
+        super().stop_program(f'[GA-Borealis] Error: GA.num_parallel > 1 is not supported by the selected adapter: {type(adapter_instance).__name__}', self.mpi_instance)
+      print(f'[GA-Borealis] Number of concurrent evaluations: {num_parallel}')
+      executor = ThreadPoolExecutor(max_workers=num_parallel)
+    else:
+      executor = None
+
+    def evaluate_population(candidates, generation):
+      # 評価の番号は PSO と同じく generation*N + i + 1
+      def evaluate(i):
+        score = objective_function( candidates[i].reshape(1, num_dimension), generation*num_population + i + 1, generation, sign_of )
+        return self.sanitize_score( score, num_objectives, value_nonfinite, 'GA' )
+      if executor is None:
+        local = [ evaluate(i) for i in my_indices ]
+      else:
+        local = list( executor.map(evaluate, my_indices) )
+      if flag_mpi:
+        gathered = comm.allgather( list(zip(my_indices, local)) )
+        result = [None]*num_population
+        for part in gathered:
+          for i, score in part:
+            result[i] = score
+        return np.array(result)
+      return np.array(local)
+
+    # 初期集団（rank 0 が作って配る）
+    if rank_mpi == 0:
+      population = np.random.uniform(lower, upper, size=(num_population, num_dimension))
+    else:
+      population = None
+    if flag_mpi:
+      population = comm.bcast(population, root=0)
+    scores = evaluate_population(population, 0)
+    ids = np.arange(num_population) + 1
+
+    # History（各世代の集団。0 は初期集団）
+    population_history = [ population.copy() ]
+    score_history = [ scores.copy() ]
+    id_history = [ ids.copy() ]
+    rank_history = [ self.non_dominated_sort(scores) ]
+    residual_history = [ 1.0 ]
+    mean_score_history = [ np.mean(scores, axis=0) ]
+    residual_init = None
     num_generation_optimized = num_generation
 
-    # Odd-even check
-    if self.is_odd(num_population):
-      print('The population size was odd, so for implementation convenience, it was corrected to an even number')
-      num_population = num_population + 1
+    for n in range(1, num_generation + 1):
+      # 子を作る（rank 0 が作って配る）
+      if rank_mpi == 0:
+        offspring = self.make_offspring(population, scores, num_population, lower, upper, setting)
+      else:
+        offspring = None
+      if flag_mpi:
+        offspring = comm.bcast(offspring, root=0)
+      offspring_scores = evaluate_population(offspring, n)
+      offspring_ids = n*num_population + np.arange(num_population) + 1
 
-    # Generating initial population
-    population = []
-    for i in range(num_population):
-      population_tmp = self.generate_population(parameter_boundary)
-      #population_tmp = np.random.uniform(low=bound_lower, high=bound_upper, size=num_dimension)
-      population.append(population_tmp)
-    #population = np.array(population)
+      # 親と子を合わせて N 個を残す（全ランクで同じ計算。乱数は使わない）
+      merged_population = np.vstack( [population, offspring] )
+      merged_scores = np.vstack( [scores, offspring_scores] )
+      merged_ids = np.concatenate( [ids, offspring_ids] )
+      selected = self.environmental_selection(merged_scores, num_population)
+      population, scores, ids = merged_population[selected], merged_scores[selected], merged_ids[selected]
+      rank_population = self.non_dominated_sort(scores)
 
-    # History
-    best_index_history = np.zeros(num_generation, dtype=int)
-    population_history = np.zeros(num_generation*num_population*num_dimension).reshape(num_generation,num_population,num_dimension)
-    solution_history   = np.zeros(num_generation*num_population).reshape(num_generation,num_population)
+      population_history.append( population.copy() )
+      score_history.append( scores.copy() )
+      id_history.append( ids.copy() )
+      rank_history.append( rank_population )
 
-    # For residual
-    solution_init = np.ones(num_population)
-    solution_prev = np.ones(num_population)
-    residual = np.zeros(num_population)
-    residaul_mean_history = []
+      # 収束の判定: 集団の値の平均の、windowsize_residual 世代前からの相対変化
+      mean_score_history.append( np.mean(scores, axis=0) )
+      residual = 1.0
+      if n >= windowsize_residual:
+        residual = np.linalg.norm( mean_score_history[-1] - mean_score_history[-1-windowsize_residual] ) \
+                   / ( np.linalg.norm(mean_score_history[0]) + 1.0e-15 )
+        if residual_init is None:
+          residual_init = residual
+      residual_history.append( residual )
 
-    # Iteration of genetic algorithm
-    for n in range(num_generation):
-      # Fitness computations (objective function)
-      fitness_values = np.zeros(num_population)
-      for i in range(num_population):
-        population_tmp = self.reshape_array( population[i],num_dimension ) 
-        fitness_values[i] = fitness_function( population_tmp )
-        
-      if n == 0: 
-        solution_init[:] = fitness_values[:].copy() 
+      if rank_mpi == 0:
+        best_text = f'{np.min(scores[:, 0]):.10e}' if num_objectives == 1 else f'front size {int(np.sum(rank_population == 0))}'
+        print('[GA-Borealis] Generation:', n, ', Best:', best_text, ', Residual:', self.text_color + f'{residual:.10e}' + self.text_end)
 
-      # Selection of the best individual
-      best_index = np.argmin(fitness_values)
-      best_individual = population[best_index]
-      best_fitness = fitness_values[best_index] #np.min(fitness_values)
-
-      # History
-      population_history[n,:,:] = population
-      solution_history[n,:]     = fitness_values
-      best_index_history[n]     = best_index
-
-      # Generating a new population (Selection, Crossover, Mutation)
-      new_population = []
-      for i in range(num_population//2):
-        # Tournament selection (Randomly select two individuals and choose the one with the better fitness)
-        tournament_indices = np.random.choice(range(num_population), size=2, replace=False)
-        tournament_fitness = fitness_values[tournament_indices]
-        selected_index = tournament_indices[np.argmin(tournament_fitness)]
-        selected_individual = population[selected_index]
-        
-         #Crossover (Take a simple average)
-        crossover_individual = np.mean([selected_individual, best_individual], axis=0)
-        
-        # Mutation (Randomly perturb individuals slightly)
-        if np.random.rand() < mutation_rate:
-          mutation_amount = np.random.uniform(low=-mutation_limit, high=mutation_limit)
-          mutated_individual = selected_individual + mutation_amount
-        else:
-          mutated_individual = selected_individual
-        
-        # Adding new individuals to the population
-        new_population.extend([crossover_individual, mutated_individual])
-
-      # Update the next generation of individuals
-      population = np.array(new_population)
-
-      # Residual of error in objective function
-      #!!!solutionはlist型、solution_prevとsolution_initはnp.ndarrayで一貫してない）
-      residual = abs((fitness_values - solution_prev)/solution_init)
-      residual_mean = np.mean(residual)
-      residaul_mean_history.append(residual_mean)
-      print('Step:',n+1, ', Relative mean residual:', self.text_color+f'{residual_mean:.10e}'+self.text_end)
-
-      if residual_mean <= config['GA']['tolerance'] :
+      if residual_init is not None and residual <= tolerance_residual and abs(residual - residual_init) > 1.0e-15:
         num_generation_optimized = n
         break
 
-      solution_prev[:] = fitness_values[:].copy()
+    if executor is not None:
+      executor.shutdown()
 
-    # Output
-    print("Best parameter:", best_individual)
-    print("Fitness of best solution:", best_fitness)
-    for n in range(0,num_generation_optimized):
-      i_opt = best_index_history[n]
-      print(n+1, i_opt+1, population_history[n,i_opt,:], solution_history[n,i_opt])
+    # 第 1 フロント（単目的なら最良の 1 個）の履歴
+    front_id, front_position, front_score = [], [], []
+    for n in range(len(population_history)):
+      front = np.where(rank_history[n] == 0)[0]
+      if num_objectives == 1:
+        front = front[ np.argsort(score_history[n][front, 0], kind='stable')[:1] ]
+      front_id.append( id_history[n][front] )
+      front_position.append( population_history[n][front] )
+      front_score.append( score_history[n][front] )
 
-    # Store data
-    solution_dict = {}
-    solution_dict[self.str_num_generation] = num_generation_optimized
-    solution_dict[self.str_residual]       = residaul_mean_history
-    solution_dict[self.str_population]     = population_history
-    solution_dict[self.str_error]          = solution_history
-    solution_dict[self.str_best_index]     = best_index_history
+    if rank_mpi == 0:
+      print("[GA-Borealis] Final front:")
+      for i, x, f in zip(front_id[-1], front_position[-1], front_score[-1]):
+        print(f"--ID: {i}, Parameter: {x}, Solution: {f}")
 
-    return best_individual, best_fitness, solution_dict
+    solution_dict = {
+      self.str_num_generation: num_generation_optimized,
+      self.str_residual:       residual_history,
+      self.str_population:     population_history,
+      self.str_error:          score_history,
+      self.str_id:             id_history,
+      self.str_rank:           rank_history,
+      self.str_front_id:       front_id,
+      self.str_front_position: front_position,
+      self.str_front_score:    front_score,
+    }
+    return solution_dict
 
 
   def write_optimization_process(self, config, solution_dict):
 
-    # Number of iteration
-    num_generation = solution_dict[self.str_num_generation]
-    # Number of particles
-    num_population = config['GA']['num_population']
-    # Number of dimension
-    num_dimension = self.num_dimension
-    # Parameter name list
-    solution_name_list = self.parameter_name_list
+    # 各世代の集団（0 は初期集団）: パラメータ、番号、目的関数の値、非劣解の順位、残差
+    num_objectives = config.get('objectives', {}).get('num_objectives', 1)
+    filename_tmp = config['GA']['result_dir'] + '/' + config['GA']['filename_output']
+    print('[GA-Borealis] Writing output file...:', filename_tmp)
 
-    # Variables
-    population_history    = solution_dict[self.str_population]
-    solution_history      = solution_dict[self.str_error]
-    best_index_history    = solution_dict[self.str_best_index]
-    residaul_mean_history = solution_dict[self.str_residual]
-
-    # Output results
-    filename_tmp =  config['GA']['result_dir'] + '/' + config['GA']['filename_output']
-    print('--Writing output file...:',filename_tmp)
-
-    file_output = open( filename_tmp , 'w')
-    # Header
     header_tmp = "Variables="
-    for n in range(0,len(solution_name_list)):
-      header_tmp = header_tmp + solution_name_list[n] + ','
-    header_tmp = header_tmp + ' ID' + ',' + ' Solution' + ',' + 'Residual_mean' + '\n'
-    file_output.write( header_tmp )
+    for name in self.parameter_name_list:
+      header_tmp = header_tmp + name + ','
+    header_tmp = header_tmp + ' ID,'
+    for k in range(num_objectives):
+      header_tmp = header_tmp + ' Error_' + str(k+1) + ','
+    header_tmp = header_tmp + ' Rank, Residual_mean\n'
 
-    for n in range(0, num_generation):
-      text_tmp = 'zone t="Time'+str(n+1) +' sec"' + '\n'
-      text_tmp =  text_tmp + 'i='+str(num_population)+' f=point' + '\n'
-      for i in range(0, num_population):
-        text_tmp = text_tmp
-        for j in range(0,num_dimension):
-          text_tmp = text_tmp  + str( population_history[n,i,j] ) + ', '
-        solution_tmp = solution_history[n,i]
-        text_tmp = text_tmp + str(i+1) + ', ' + str(n+1) + ', ' + str(solution_tmp) + '\n'
-      file_output.write( text_tmp )
-    file_output.close()
+    with open(filename_tmp, 'w') as file_output:
+      file_output.write(header_tmp)
+      for n in range(len(solution_dict[self.str_population])):
+        population = solution_dict[self.str_population][n]
+        text_tmp = 'zone t="Generation' + str(n) + '"\n' + 'i=' + str(len(population)) + ' f=point\n'
+        for i in range(len(population)):
+          text_tmp = text_tmp + ', '.join( str(x) for x in population[i] ) + ', '
+          text_tmp = text_tmp + str(solution_dict[self.str_id][n][i]) + ', '
+          text_tmp = text_tmp + ', '.join( str(f) for f in solution_dict[self.str_error][n][i] ) + ', '
+          text_tmp = text_tmp + str(solution_dict[self.str_rank][n][i]) + ', ' + str(solution_dict[self.str_residual][n]) + '\n'
+        file_output.write(text_tmp)
 
     return
 
 
   def write_best_solution_history(self, config, solution_dict):
 
-    # Number of iteration
-    num_generation = solution_dict[self.str_num_generation]
-    # Number of particles
-    num_population = config['GA']['num_population']
-    # Number of dimension
-    num_dimension = self.num_dimension
+    # 各世代の第 1 フロント（単目的では最良）: PSO の output_global.dat と同じ形
+    num_objectives = config.get('objectives', {}).get('num_objectives', 1)
+    filename_tmp = config['GA']['result_dir'] + '/' + config['GA']['filename_global']
+    print('[GA-Borealis] Writing front history file...:', filename_tmp)
 
-    # Variables
-    best_index_history = solution_dict[self.str_best_index]
-    population_history = solution_dict[self.str_population]
-    solution_history   = solution_dict[self.str_error]
-
-    # Output results: Global information
-    filename_tmp =  config['GA']['result_dir'] + '/' + config['GA']['filename_global']
-    print('--Writing best solution file...:',filename_tmp)
-
-    file_output = open( filename_tmp , 'w')
-    # Header
-    header_tmp = 'Variables = Step, GID, GSolution, '
-    for n in range(0,num_dimension):
-      header_tmp = header_tmp + 'GParameter_' + str(n+1) + ', '
-    header_tmp = header_tmp.rstrip(',') + '\n'
-    file_output.write( header_tmp )
-
-    for n in range(0, num_generation):
-      i_opt = best_index_history[n]
-      g_id  = n*num_population + i_opt
-      text_tmp = str(n) + ', ' + str(g_id) + ', ' 
-      text_tmp = text_tmp + str(solution_history[n, i_opt]) +  ', ' 
-      for m in range(0,num_dimension):
-        text_tmp = text_tmp + str( population_history[n, i_opt, m] ) + ', '
-      text_tmp = text_tmp.rstrip(',') + '\n'
-      file_output.write( text_tmp )
-    file_output.close()
+    obj_header = ', '.join( f'Objective{k+1}' for k in range(num_objectives) )
+    param_header = ', '.join( f'Parameter{n+1}' for n in range(self.num_dimension) )
+    with open(filename_tmp, 'w') as file_output:
+      file_output.write(f'Variables = Step, Pareto_ID, {obj_header}, {param_header}\n')
+      for n in range(len(solution_dict[self.str_front_id])):
+        for i, x, f in zip(solution_dict[self.str_front_id][n], solution_dict[self.str_front_position][n], solution_dict[self.str_front_score][n]):
+          line = f'{n}, {i}, ' + ', '.join( str(v) for v in f )
+          for value in x:
+            line += f', {value}'
+          file_output.write(line + '\n')
 
     return
 
 
   def drive_optimization(self, config, objective_function, parameter_boundary):
 
-    best_condition, best_value, solution_dict = self.run_optimizer_ga(config, objective_function, parameter_boundary)
+    solution_dict = self.run_optimizer_ga(config, objective_function, parameter_boundary)
 
     if self.mpi_instance.rank == 0:
       self.write_optimization_process(config, solution_dict)

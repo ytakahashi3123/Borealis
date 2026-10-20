@@ -1,0 +1,37 @@
+% ---------------------------------------------------------------------------
+% Borealis --- 設定ファイル (borealis.yml) の対応表 (日本語)
+%
+% 本文の正は config_reference_ja.md で、md_to_tex.py がそこから
+% config_reference_ja_body.tex を作る。本文を直すときは .md を直すこと。
+%
+%   cd report && make config   (変換 + platex を 2 回 + dvipdfmx)
+%
+% 体裁は詳細レポートと同じ borealis.sty を使う (jsarticle、platex + dvipdfmx)。
+% ---------------------------------------------------------------------------
+\documentclass[10pt,a4paper,dvipdfmx]{jsarticle}
+% longtable は hyperref より先に読む (hyperref は borealis.sty の最後で読む)
+\usepackage{longtable}
+\usepackage[dvipdfmx]{borealis}
+
+\renewcommand{\tablename}{表}
+\renewcommand{\contentsname}{目次}
+% 表の中の行間は詰める (borealis.sty の 1.15 は数値の表向け)
+\renewcommand{\arraystretch}{1.1}
+\setlength{\LTpre}{0.5\baselineskip}
+\setlength{\LTpost}{0.5\baselineskip}
+
+\title{Borealis\\[0.3\baselineskip]
+\large 設定ファイル (\texttt{borealis.yml}) の対応表}
+\subtitle{キー・既定値・選べる値・効かないキー}
+\author{高橋裕介}
+\date{2026 年 10 月 20 日 (Borealis version 1.7.0)}
+\runninghead{Borealis：設定ファイルの対応表}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\clearpage
+
+\input{config_reference_ja_body}
+
+\end{document}

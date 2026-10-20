@@ -6,34 +6,14 @@ source ${HOME}/.dir_opt_bashrc/.bashrc_precice-v320_su2
 source ${HOME}/.dir_opt_bashrc/.bashrc_precice-v320_borealis
 
 PYTHON=python3
-filename_jobrequests="job_requests"
 
 # Optimizer
 # Initial settings
 LD_BORE=$HOME_BORE/src/borealis.py
 LOG_BORE=log_borealis
-MPIP_BORE=mpirun.openmpi
-num_process_bore=6
-
-# Delete old files
-if [ -f "$filename_jobrequests" ]; then
-  rm "$filename_jobrequests"
-  if [ $? -eq 0 ]; then
-    echo "$filename_jobrequests has been deleted."
-  else
-    echo "Failed to delete $filename_jobrequests." >&2
-    exit 1
-  fi
-else
-  echo "$filename_jobrequests does not exist."
-fi
 
 # Run Borealis
-parallel_bore=true
-if $parallel_bore ; then
-  $MPIP_BORE -n $num_process_bore $PYTHON $LD_BORE > $LOG_BORE &
-else
-  $PYTHON $LD_BORE > $LOG_BORE &
-fi
-
-./run_SU2-OPT.sh
+# Borealis自身はmpirunで起動しない(MPI起動したプロセスからはSU2のmpirunを起動できないため)。
+# ケースの同時実行数はborealis.ymlのPSO.num_parallel、ケースあたりのコア数はshapeoptimizer.num_cpu_per_caseで指定する。
+# (以前のjob_requests+run_SU2-OPT.sh監視方式は不要)
+$PYTHON $LD_BORE > $LOG_BORE 2>&1

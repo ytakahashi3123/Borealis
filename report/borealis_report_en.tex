@@ -1,0 +1,456 @@
+% ---------------------------------------------------------------------------
+% Borealis: a framework for inverse problems and optimization that searches
+% the inputs of external computer codes --- detailed report (English)
+%
+% Keep the same structure and the same numbers as borealis_report_ja.tex.
+%
+%   cd report && make en      (pdflatex twice, for the table of contents)
+%   cd report && make verify  (run the verification cases)
+%   cd report && make figure  (rebuild the figures from their results)
+% ---------------------------------------------------------------------------
+\documentclass[11pt,a4paper]{article}
+\usepackage{borealis}
+
+\title{Borealis\\[0.3\baselineskip]
+\large A framework for inverse problems and optimization that searches the inputs of external codes}
+\subtitle{Design, methods, parallelization and verification}
+\author{Yusuke Takahashi}
+\date{20 October 2026 (Borealis version 1.7.0)}
+
+\affiliation{Hokkaido University}
+\runninghead{Borealis: design, methods, parallelization and verification}
+
+\begin{document}
+\maketitle
+\begin{borealisabstract}
+Borealis is a Python framework that searches the input parameters of an external computer code (or of a simple function) so that its output comes close to reference data. The optimization methods (particle swarm optimization, PSO; artificial bee colony, ABC; genetic algorithm, GA; Bayesian optimization) and the codes being driven (the trajectory code Tacode, heat conduction, shape optimization with SU2 and preCICE, and others) are kept apart as ``adapters'', and one YAML configuration file selects the combination. PSO, ABC and GA can share the evaluations among processes with mpi4py, and PSO and GA also optimize several objectives. For external codes that themselves run under MPI, Borealis can also run as a single process and evaluate the candidates concurrently in threads. This report describes what the code computes and how, how it is parallelized, and how close it gets to the answer on problems whose solution is known. Unless stated otherwise, the numbers come from the verification cases (\texttt{report/verification/}) and the measurements (\texttt{report/data/}) of the repository, and the figures are made from their output.
+\end{borealisabstract}
+\tableofcontents
+\vspace{1em}
+
+\section{Scope of this report}
+
+Borealis solves problems of the following form. A computer code takes input parameters $\mathbf{x}$ and returns an output. Reference data, from observation or from another computation, are given, and the output should come close to them. The difference between the output and the reference data is taken as the objective function $f(\mathbf{x})$, and Borealis searches for the $\mathbf{x}$ that makes it small. It does not look inside the code; it only rewrites the input, runs the code and reads the output, again and again. This is black-box optimization.
+
+This report describes what the code assumes (Section~\ref{sec:problem}), how it is put together (Section~\ref{sec:structure}), what the four methods compute (Section~\ref{sec:methods}), how they are parallelized (Section~\ref{sec:parallel}), and how far the answers are from the exact solutions (Section~\ref{sec:verification}). The equations of the methods are written \textbf{as they are in the source}, not in the general form of the literature; where they differ from the standard form, this is said where it happens.
+
+\texttt{README.md} is the overview. Every key of the configuration file is listed in \texttt{report/borealis\_config\_ja.pdf} (in Japanese). What is not fixed yet or not checked yet is numbered in a development record kept outside the repository, and the text refers to it by number, as in ``known issue 7''.
+
+\section{Problem setting}\label{sec:problem}
+
+\subsection{Parameters and bounds}
+
+The parameters are written in \texttt{parameter\_optimized.boundary} of the configuration file, as names (\texttt{name}) holding components (\texttt{component}). Each component has a name (\texttt{type}) and a lower and an upper bound (\texttt{bound\_min}, \texttt{bound\_max}); all the components in order make the parameter vector $\mathbf{x} = (x_1, \dots, x_d)$. The \texttt{name} is the key used to find the variable to rewrite in the control file of the external code (how it is used differs between adapters).
+
+The bounds act as follows.
+
+\begin{itemize}
+\item PSO, ABC and GA draw their initial values, and Bayesian optimization its initial points, uniformly within the bounds. Bayesian optimization also searches the maximum of the acquisition within the bounds
+\item ABC and GA keep new candidates within the bounds
+\item \textbf{PSO does not clip}. Particles can leave the bounds, and the external code then receives values outside them (known issue 21)
+\end{itemize}
+
+\subsection{Objective function and penalty}
+
+The objective function is the real number (a list of real numbers for several objectives) returned by \texttt{objective\_function} of the adapter. In adapters that drive an external code it is usually the sum of the squares of the differences between the output and the reference data, or the square root of their mean.
+
+With \texttt{flag\_penalty: True}, the adapter adds \texttt{penalty\_value} when the parameters are outside the bounds.
+
+\begin{equation}
+  \tilde f(\mathbf{x}) = f(\mathbf{x}) + P(\mathbf{x}),\qquad
+  P(\mathbf{x}) =
+  \begin{cases}
+    p & \text{if } x_i \notin [x_i^{\min}, x_i^{\max}] \text{ for some } i\\
+    0 & \text{otherwise}
+  \end{cases}
+\end{equation}
+
+$p$ is a constant that depends neither on how many parameters are outside nor on how far (known issue 13). Outside the bounds the function is flat, so the penalty alone gives no gradient that brings the particles back.
+
+\subsection{Minimization and maximization}
+
+All four methods minimize. With \texttt{maximize: True}, PSO, ABC and GA pass the sign $s = -1$ to the objective function as an argument, and \textbf{the adapter applies the sign} (the penalty is added after the sign). Adapters that apply it declare \texttt{flag\_apply\_sign}; they are now \texttt{shapeoptimizer} and \texttt{simple\_function}. The other adapters return an error, for which maximization has no meaning, and \texttt{maximize: True} stops the run at start-up (up to 1.6 they silently kept minimizing; known issue 1). Bayesian optimization handles the sign itself, so it can maximize with any adapter.
+
+\subsection{Failed evaluations}
+
+When the external code fails (a non-zero exit status, no result file, or no point that can be compared with the reference data), the adapter returns infinity. PSO, ABC and GA replace NaN or infinite values of the objective by \texttt{parameter\_optimized.value\_nonfinite} (default $10^{30}$) with a warning. Up to 1.6 a NaN took over the leader through \texttt{np.argmin}, and the error could be computed from old results of a failed external code (known issues 2 and 7).
+
+\section{Structure of the code}\label{sec:structure}
+
+\subsection{Three layers}
+
+\begin{itemize}
+\item \texttt{src/borealis.py}: the entry point. It reads the words \texttt{adapter.kind\_adapter} and \texttt{optimizer.kind\_optimizer} of the configuration file and loads and combines the corresponding classes
+\item \texttt{src/optimizer\_*/}, \texttt{src/Bayesian\_optimization/}: the optimization methods, which call \texttt{objective\_function} of the adapter
+\item \texttt{src/adapter\_*/}: the side that runs a code and returns the value of the objective function. \texttt{src/adapter\_template/} has two templates (a minimal one with an analytic function only, and a complete one that drives an external code)
+\end{itemize}
+
+Adapters and optimizers both inherit from the common base class \texttt{orbital} (\texttt{src/orbital/orbital.py}), which holds directory handling, YAML reading, the penalty and the conversion of time units. MPI is a thin wrapper in \texttt{src/mpi/mpi.py}; with one process the code behaves serially.
+
+\subsection{Order of calls}
+
+\texttt{borealis.py} calls the adapter and the optimizer in this order.
+
+\begin{enumerate}
+\item \texttt{adapter.initial\_settings(config)}: makes the working directory and copies the template case. \textbf{The working directory is removed with its contents first}
+\item \texttt{adapter.reference\_data\_setting(config)}: reads the reference data
+\item \texttt{optimizer.initial\_setting(config)}: makes the output directory (also removed first)
+\item \texttt{optimizer.boundary\_setting(config)}: converts the bounds to the form of the method (a list of $(x^{\min}, x^{\max})$ pairs for PSO, ABC and GA, a dictionary from serial names to bounds for Bayesian optimization)
+\item \texttt{optimizer.drive\_optimization(config, adapter.objective\_function, ...)}: runs the optimization and writes the results
+\end{enumerate}
+
+The objective function is called as \texttt{objective\_function(x, id, step, sign)}. \texttt{x} is an array of shape $(1, d)$ (following the calling convention of GPyOpt, the former library of Bayesian optimization). All four methods pass a unique number \texttt{id} for each evaluation, the step \texttt{step} and the sign \texttt{sign}; the adapter uses \texttt{id} as the number of the case directory.
+
+\subsection{Driving an external code}
+
+\texttt{objective\_function} of an adapter that drives an external code does roughly the following.
+
+\begin{enumerate}
+\item Copy the template case to \texttt{<work\_dir>/<case\_dir><number>}
+\item Find the variables named by the parameters in the control file and rewrite their values
+\item Start the external code and wait for it to end (\texttt{subprocess.call})
+\item Read the result file, compare it with the reference data and compute the error, adding the penalty outside the bounds
+\end{enumerate}
+
+Every case directory is kept, so the case of the best solution can be taken out and examined afterwards (\texttt{src\_helper/pickup\_optimal\_result}). Starting the external code is gathered in \texttt{orbital.run\_external\_code}, which removes a result file copied from the template before the start and checks the exit status and the result file afterwards. The child process does not receive the MPI environment variables (Section~\ref{sec:parallel-eval}).
+
+\section{Optimization methods}\label{sec:methods}
+
+Below, $N$ is the number of candidates (particles, employed bees), $d$ the dimension, $n$ the step and $\mathcal{U}(a,b)$ a uniform random number. The random numbers come from the global generator of numpy; with \texttt{optimizer.seed}, each rank is seeded with $\mathit{seed} + \mathit{rank}$.
+
+\subsection{Particle swarm optimization (PSO)}\label{sec:pso}
+
+\texttt{src/optimizer\_pso/optimizer\_pso.py}. PSO with an inertia weight \cite{kennedy1995,shi1998}, with an archive of non-dominated solutions for several objectives \cite{coello2004}.
+
+\paragraph{Initialization.} The position $\mathbf{x}_i$ of particle $i$ is drawn uniformly within the bounds (with \texttt{boundary\_initial}, that single range is used for every dimension). The velocity $\mathbf{v}_i$ is drawn from \texttt{velocity\_initial} if given, and otherwise from $\mathcal{U}(-1, 1)$ \textbf{whatever the scale of the parameters}. The personal best value $f(\mathbf{p}_i)$ starts at $+\infty$.
+
+\paragraph{One step.} Each step does the following.
+
+\begin{enumerate}
+\item Evaluate the objective function at the current positions $\mathbf{x}_i^n$ of all particles (NaN and infinite values are replaced by \texttt{value\_nonfinite})
+\item If the new value dominates the personal best (for one objective, if it is strictly smaller), update the personal best $\mathbf{p}_i$
+\item Build the archive \textbf{from the current positions of the particles of this step only}: the single best point for one objective, the set of mutually non-dominated points for several
+\item Choose the leader $\mathbf{g}$ from the archive: the only point for one objective, a uniformly random member for several
+\item Update the velocities and positions
+\end{enumerate}
+
+\begin{align}
+  \mathbf{v}_i^{n+1} &= w\,\mathbf{v}_i^{n} + c_1\,\mathbf{r}_1 \circ (\mathbf{p}_i - \mathbf{x}_i^{n}) + c_2\,\mathbf{r}_2 \circ (\mathbf{g} - \mathbf{x}_i^{n}), \\
+  \mathbf{x}_i^{n+1} &= \mathbf{x}_i^{n} + \mathbf{v}_i^{n+1}
+\end{align}
+
+Here $w$ is \texttt{inertia}, $c_1$ \texttt{cognitive\_coef}, $c_2$ \texttt{social\_coef}, $\mathbf{r}_1, \mathbf{r}_2$ vectors of independent $\mathcal{U}(0,1)$ components and $\circ$ the componentwise product. Neither the positions are clipped nor the velocities limited.
+
+\textbf{What differs from the standard PSO} is the leader. In the standard PSO the global best is the best point found so far; in Borealis the leader is \textbf{the best of the particles of the current step}, and good points of the past are lost at the next step (a deliberate choice according to the comment in the source; known issue 10). The personal bests remember the past, so the swarm does not forget the best point altogether. A function that chooses the leader of several objectives by crowding distance (\texttt{select\_global\_best\_cd}) is written but not used.
+
+\paragraph{Convergence.} From the history of the personal best values, the relative change of each particle is
+
+\begin{equation}
+  r_i^n = \frac{\left\| f(\mathbf{p}_i)^{(n)} - f(\mathbf{p}_i)^{(n-W+1)} \right\|}{\left\| f(\mathbf{p}_i)^{(0)} \right\| + 10^{-15}},
+\end{equation}
+
+and its mean over the particles, $\bar r^n$, is the ``swarm residual''. $W$ is \texttt{windowsize\_residual} (default 20) and $f(\mathbf{p}_i)^{(0)}$ the personal best value after the first step. For one objective, the run has converged when $\bar r^n \le$ \texttt{tolerance\_residual} (default $10^{-5}$) and $\bar r^n$ differs from the first residual computed (which excludes the apparent convergence of nothing having changed during $W$ steps).
+
+For several objectives, the stagnation of the archive is required as well. With the mean (centroid) $\bar{\mathbf{f}}^n$ of the values of the archive, the archive stagnates when $\|\bar{\mathbf{f}}^n - \bar{\mathbf{f}}^{n-W_a+1}\| \le$ \texttt{tolerance\_archive} (default 1.0; $W_a$ is \texttt{windowsize\_archive}, default 5), and the run has converged when both the residual and the stagnation hold.
+
+\paragraph{Number of evaluations.} $N$ per step.
+
+\subsection{Artificial bee colony (ABC)}\label{sec:abc}
+
+\texttt{src/optimizer\_abc/optimizer\_abc.py}. The ABC of Karaboga \cite{karaboga2005,karaboga2007}, for one objective only (that it accepts a setting with several objectives is known issue 12).
+
+$N$ food sources $\mathbf{x}_i$ are drawn uniformly within the bounds and evaluated. Each step has three phases.
+
+\paragraph{Employed bees.} For each $i$, a dimension $k$ and a $j \ne i$ are chosen at random and
+
+\begin{equation}
+  v_{k} = x_{ik} + \phi\,(x_{ik} - x_{jk}),\qquad \phi \sim \mathcal{U}(-1, 1)
+\end{equation}
+
+(the other dimensions keep the values of $\mathbf{x}_i$). $v_k$ is clipped to the bounds. If the fitness
+
+\begin{equation}
+  \mathrm{fit}(f) = \begin{cases} 1/(1+f) & f \ge 0 \\ 1 + |f| & f < 0 \end{cases}
+\end{equation}
+
+improves, $\mathbf{x}_i$ is replaced by $\mathbf{v}$ and its visit counter reset to 0; otherwise the counter is increased by 1.
+
+\paragraph{Onlooker bees.} $M$ bees (\texttt{num\_onlook\_bee}) choose food source $i$ with probability $\mathrm{fit}_i / \sum_l \mathrm{fit}_l$ (roulette-wheel selection) and search its neighbourhood in the same way as the employed bees.
+
+\paragraph{Scout bees.} A food source whose visit counter \textbf{exceeds} \texttt{visit\_limit} (the old spelling \texttt{vist\_limit} is still read) is abandoned, drawn again uniformly within the bounds and evaluated. \textbf{The best food source is not exempt.}
+
+\paragraph{Best and convergence.} ABC keeps the best solution found so far apart from the food sources, so it is not lost when a scout abandons the best source. The output file \texttt{output\_global.dat} holds the best so far at each step (up to 1.6 it held the best of the food sources at each step, which could get worse; known issue 16, Section~\ref{sec:val-sphere}). With $W$ = \texttt{windowsize\_residual} (default 1), convergence is $\mathrm{mean}_i |f_i^n - f_i^{n-W}| / (|f_i^{0}| + 10^{-20}) \le$ \texttt{tolerance}, not checked during the first $W$ steps. A step without any improvement makes this 0, so if the run stops too early, increase $W$ (known issue 5).
+
+\paragraph{Number of evaluations.} $N + M$ per step, plus the number of scouts. The evaluation number is $10000 \times \text{step} + 1000 \times \text{phase} + \text{bee number}$, so the numbers collide when $N$ or $M$ reaches 1000.
+
+\subsection{Genetic algorithm (GA)}\label{sec:ga}
+
+\texttt{src/optimizer\_ga/optimizer\_ga.py}. A real-coded GA with the survivor selection of NSGA-II \cite{deb2002}. With one objective it is an elitist $(\mu + \lambda)$ GA in which the best individual always survives; with two or more objectives it is NSGA-II itself.
+
+\paragraph{One generation.} $N$ children are made from $N$ parents and evaluated, and the next $N$ individuals are chosen from the $2N$ parents and children together. Only the $N$ children are evaluated in a generation; the values of the parents are carried over.
+
+\begin{enumerate}
+\item \textbf{Selection}: \texttt{tournament\_size} (default 2) individuals are drawn at random, and the one with the lower non-dominated rank, or with the same rank the larger crowding distance, becomes a parent
+\item \textbf{Crossover}: with probability \texttt{crossover\_rate} (default 0.9), SBX \cite{deb1995}. For each component with probability 0.5, parents $y_1 < y_2$ give
+\begin{equation}
+  c_{1,2} = \tfrac{1}{2}\left[ (y_1 + y_2) \mp \beta_q (y_2 - y_1) \right],
+\end{equation}
+where $\beta_q$ is drawn from a polynomial distribution with index $\eta_c$ (\texttt{eta\_crossover}, default 15) so that the children stay within the bounds. A larger $\eta_c$ puts the children closer to the parents
+\item \textbf{Mutation}: each component, with probability \texttt{mutation\_rate} (default $1/d$), is shifted by polynomial mutation \cite{deb1996}, $y \leftarrow y + \delta_q (y^{\max} - y^{\min})$, with $\delta_q$ drawn from a distribution with index $\eta_m$ (\texttt{eta\_mutation}, default 20) so that it stays within the bounds
+\item \textbf{Survivor selection}: the $2N$ parents and children are ranked by non-dominated sorting, and $N$ are kept in order of rank and, within a rank, of decreasing crowding distance
+\end{enumerate}
+
+\paragraph{Convergence and output.} The run stops when the relative change of the mean value of the population over \texttt{windowsize\_residual} (default 20) generations, $\|\bar{\mathbf{f}}^n - \bar{\mathbf{f}}^{n-W}\| / (\|\bar{\mathbf{f}}^0\| + 10^{-15})$, is at most \texttt{tolerance\_residual} (default $10^{-5}$) and differs from the first value computed (the same guard as PSO). \texttt{output\_global.dat} holds the first front (the best, for one objective) of every generation; with elitism the best of one objective never gets worse.
+
+\paragraph{Parallelization.} Under MPI, selection, crossover and mutation are done by rank 0 alone and sent to all ranks, and only the evaluation of the children is shared (\texttt{allgather}), so that all ranks hold the same population even with different random seeds. The concurrent evaluation with \texttt{num\_parallel} works as in PSO.
+
+\paragraph{Number of evaluations.} $N$ for the initial population and $N$ per generation.
+
+The GA up to 1.6 was a prototype that crossed with the mean of the best of the step and shifted all components by the same amount, and it was disabled in \texttt{borealis.py}. Version 1.7.0 replaced it.
+
+\subsection{Bayesian optimization}\label{sec:bo}
+
+\texttt{src/Bayesian\_optimization/Bayesian\_optimization.py}. A Gaussian process is the surrogate model, and the point that maximizes an acquisition function is evaluated next \cite{jones1998}. The Gaussian process and the acquisition function are left to bayesian-optimization \cite{bayesopt}; Borealis receives the candidates one at a time, evaluates them and registers the values (suggest and register).
+
+\begin{enumerate}
+\item The first \texttt{initial\_design\_numdata} points are drawn uniformly within the bounds and evaluated
+\item Then, \texttt{num\_optiter} times, the acquisition function is built from a Gaussian process fitted to all points so far, and the point that maximizes it is evaluated
+\end{enumerate}
+
+The acquisition function is the expected improvement (EI), the probability of improvement (PI) or the confidence bound (LCB; the lower bound when minimizing). The exploration parameter $\xi$ of EI and PI is \texttt{acquisition\_xi}, and the weight $\kappa$ of LCB is \texttt{acquisition\_weight}. bayesian-optimization maximizes, so for minimization the values are registered with their sign reversed. As in PSO and ABC, the evaluation number is passed to the objective function, NaN and infinite values are replaced by \texttt{value\_nonfinite}, and the random seed is \texttt{optimizer.seed}. The surrogate is refitted after every evaluation, so the method suits external codes that are expensive per run, with tens of evaluations (Section~\ref{sec:val-bo}). It is not shared among MPI processes.
+
+Up to 1.6 it used GPyOpt \cite{gpyopt2016}, which is no longer maintained and does not run with numpy 2, so it was replaced (known issue 22). The settings keep their names; the options that only GPyOpt had (models other than the Gaussian process, the MCMC acquisitions, the plot of the acquisition) are gone.
+
+\section{Parallelization}\label{sec:parallel}
+
+\subsection{Sharing the candidates with MPI}
+
+Started as \texttt{mpirun -n P python3 borealis.py}, PSO, ABC and GA divide the candidates among the ranks.
+
+\begin{itemize}
+\item \textbf{PSO}: the particles are cut evenly into contiguous blocks with \texttt{np.array\_split} (up to 1.6 the remainder went to the last rank; known issue 9). Each rank evaluates its own particles; at the end of the step the positions, values and numbers are gathered to rank 0 (\texttt{gather}), which builds the archive and the leader and sends them to all ranks (\texttt{bcast}). Each rank updates the velocities of its own particles. The histories are combined with \texttt{allreduce} at the end
+\item \textbf{ABC}: the employed bees are divided evenly with \texttt{np.array\_split}, and the food sources of all ranks are made equal with \texttt{Allreduce} at the end of each phase. The onlookers choose among all food sources and can update one outside their own block, so their updates are collected with \texttt{allgather} and applied by all ranks in the same order (when only the own block was collected, updates outside it were lost; known issue 25)
+\end{itemize}
+
+\begin{itemize}
+\item \textbf{GA}: the children are divided with \texttt{np.array\_split}, and their values are collected with \texttt{allgather}. The genetic operations are done by rank 0 and sent with \texttt{bcast} (Section~\ref{sec:ga})
+\end{itemize}
+
+Only rank 0 makes directories and writes files. When the external code is serial, this scheme works as it is: each rank is bound to one core, the external code it starts inherits that core, and $P$ external codes run side by side on $P$ cores.
+
+\subsection{When the external code runs under MPI: concurrent evaluation}\label{sec:parallel-eval}
+
+When the external code itself runs under MPI (now the SU2 of \texttt{shapeoptimizer}), the scheme above cannot be used.
+
+\begin{itemize}
+\item Starting the \texttt{mpirun} of an external code from a rank started by MPI fails: the child inherits the environment variables of the parent job (\texttt{OMPI\_*}, \texttt{PMIX\_*}) and takes itself for one rank of the existing job (known issue 18)
+\item Even if it starts, the child inherits the binding of the parent rank to one core, and all its MPI processes are packed onto that core
+\item \textbf{Even without mpirun}, importing mpi4py (a singleton \texttt{MPI\_Init}) adds these variables to the environment on the C side. With \texttt{env=None}, \texttt{subprocess} passes them to the child, whose \texttt{mpirun} ends with exit code 1 and no message. Python's \texttt{os.environ} is the copy taken at start-up and does not contain them, so passing \texttt{env=dict(os.environ)} explicitly lets it start (known issue 19; both cases checked with Open MPI 4.1.6)
+\end{itemize}
+
+Borealis is therefore started as a single process without MPI, and PSO calls the evaluations of the particles of each step concurrently in threads (\texttt{PSO.num\_parallel}). Each thread only waits for a child process, so the global interpreter lock of Python does not matter. The results come back in the order of the particles, and the personal bests and the archive are updated in the same order as in a serial run; the PSO algorithm is unchanged.
+
+On the adapter side, each evaluation takes a ``slot'' (a set of cores), copies the template and starts the external code with \texttt{subprocess.Popen}. The cores of a slot are taken in order from the cores this process may use (\texttt{os.sched\_getaffinity}; under a job scheduler, the cores given to the job). The cores are passed to the run script in the environment variable \texttt{BOREALIS\_CPU\_SET}, which the script gives to \texttt{mpirun --cpu-set}. Several \texttt{mpirun} started independently do not know of each other and, unless told, all bind to the first cores, so this setting is needed. A slot is returned only after the external code has ended. If the code ends without writing its result file, \texttt{penalty\_failure} is returned as the value of the objective and the optimization goes on. Because it is called from several threads at once, the adapter must not use \texttt{os.chdir} (which acts on the whole process) and must not keep per-evaluation state in the instance. Only adapters that meet these conditions declare \texttt{flag\_parallel\_evaluation = True}; with any other adapter \texttt{num\_parallel > 1} stops the run. PSO, GA and ABC support it among the optimizers, and \texttt{shapeoptimizer} and \texttt{simple\_function} among the adapters (known issue 17). In ABC the candidates of the employed bees are made from the food sources at the start of the phase (serially, a later bee refers to a food source updated earlier), so a concurrent run gives a different answer from a serial one; the initialization, onlooker and scout phases, whose candidates do not depend on each other, give the serial answer.
+
+The measured speed is in Section~\ref{sec:val-parallel}.
+
+\section{Adapters}\label{sec:adapters}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabularx}{\linewidth}{lX}
+\toprule
+\texttt{kind\_adapter} & contents \\
+\midrule
+\texttt{simple\_function} & analytic objective (shifted sphere functions $f_k(\mathbf{x}) = |\mathbf{x} - 2(k-1)\mathbf{1}|^2$); no external code. Used for verification \\
+\texttt{example\_externalcode} & template that drives an external code; curve fitting \\
+\texttt{tacode} & trajectory code Tacode (Python and Fortran versions); estimates the atmospheric density from orbit observations \cite{takahashi2022,sakai2024} \\
+\texttt{heatcond} & heat conduction; estimates the heat flux from the history of the surface temperature \\
+\texttt{shapeoptimizer} & SU2 with shape deformation coupled through preCICE (\texttt{src\_interface/}); two objectives, drag and moment \\
+\texttt{cage} & the cage analysis \\
+\texttt{user} & slot for a user-defined adapter \\
+\bottomrule
+\end{tabularx}
+\caption{Adapters. Their configuration keys are in \texttt{report/borealis\_config\_ja.pdf}.}
+\end{table}
+
+A new adapter is written by copying a template, implementing the four methods (\texttt{\_\_init\_\_}, \texttt{initial\_settings}, \texttt{reference\_data\_setting}, \texttt{objective\_function}) and adding its name to the dispatch in \texttt{borealis.py}.
+
+\paragraph{A caution for adapters that compare in time.} \texttt{tacode} looks, for each time of the reference data, for the corresponding point in the computed times and compares by linear interpolation between the two neighbouring points. The \texttt{day} of the time unit \texttt{reference.timeunit} is the \textbf{sidereal day} (86164.0989~s). Up to 1.6 the search had a structure that, when a reference time lay outside the computed range, compared with the last point of the array through Python's negative index (known issue 6). In the ISS example this happened because the reference was made with calendar days, and the objective kept returning plausible values of 0.05--0.06 while it was comparing two points that were not at the same time (known issue 23). In 1.7.0 points outside the range are not compared, and their number is reported as a warning. \textbf{A small objective is no evidence of a correct answer.} Compare the time series of the best solution with the reference data in a figure.
+
+\section{Output}\label{sec:output}
+
+The results are written to \texttt{<method>.result\_dir} as Tecplot ASCII.
+
+\begin{itemize}
+\item \texttt{filename\_output} (PSO, ABC, GA): the position (and for PSO the velocity, for GA the non-dominated rank), number, error and residual of every candidate at every step (generation), one Tecplot zone per step
+\item \texttt{filename\_global} (PSO, ABC, GA): the number, value and position of the archive (PSO), the best so far (ABC) or the first front (GA; the best for one objective) at every step. For several objectives with PSO, the rows of the last step are the final archive, \textbf{not the Pareto front over the whole history} (known issue 10)
+\item \texttt{filename\_output} (Bayesian optimization): the points, values and numbers in the order of evaluation
+\end{itemize}
+
+In PSO the number is $n N + i + 1$ ($n$ and $i$ counted from 0) and matches the number of the case directory of the adapter. The tools of \texttt{src\_helper/} (taking out the best solution, deleting the cases that are not optimal, an animation of the history) find the cases by this number.
+
+\section{Verification}\label{sec:verification}
+
+The verification uses \texttt{simple\_function}, whose solution is known, in five dimensions with each component in $[-10, 10]$. The cases are in \texttt{report/verification/}, with the random seed fixed by \texttt{optimizer.seed}, and \texttt{report/run\_verification.py} runs them all. Each case takes about a second.
+
+\subsection{One objective: the sphere function}\label{sec:val-sphere}
+
+$f(\mathbf{x}) = |\mathbf{x}|^2$, with the minimum $f = 0$ at $\mathbf{x} = \mathbf{0}$. PSO has 20 particles with $w = 0.5$ and $c_1 = c_2 = 1.0$; ABC has 20 employed and 20 onlooker bees with \texttt{visit\_limit} = 10; GA has 20 individuals with the default crossover and mutation.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.98\linewidth]{convergence.png}
+\caption{Convergence on the sphere function. Left: against the step. For PSO, the solid line is the archive of each step (the best of that step) and the dashed line the best so far. For ABC, the solid line is \texttt{output\_global.dat} (the best so far) and the dotted line the best food source of each step (\texttt{output\_ABC.dat}). For GA, the best of each generation (equal to the best so far, with elitism). Right: the best so far against the number of evaluations, with Bayesian optimization (the evaluations of the scouts of ABC are not counted).}
+\label{fig:convergence}
+\end{figure}
+
+Figure~\ref{fig:convergence} shows the results.
+
+\begin{itemize}
+\item PSO met its convergence criterion after 58 steps (1160 evaluations) and stopped at $f = 7.3 \times 10^{-12}$. The best of each step fell almost monotonically and nearly coincides with the best so far; on this problem, a leader that is the best of the current step does not hinder convergence
+\item ABC ran all 100 steps (about 4000 evaluations), and its best so far was $f = 1.7 \times 10^{-8}$. The best food source of each step (dotted) gets worse by more than an order of magnitude at steps 10 and 27: a scout abandoned the best food source, which had stopped improving, and drew it again. The best so far (solid, \texttt{output\_global.dat}) falls monotonically (up to 1.6 the file held the dotted values; known issue 16)
+\item GA reached $f = 3.2 \times 10^{-4}$ after 100 generations (2020 evaluations). Its best falls monotonically but hardly moves after generation 50 ($5.5 \times 10^{-4}$): a real-coded GA closes in on the optimum more slowly than PSO. For accuracy, increase \texttt{eta\_mutation} and \texttt{eta\_crossover} (children closer to the parents) or use PSO
+\end{itemize}
+
+\subsection{Two objectives: the Pareto front}\label{sec:val-pareto}
+
+Let $f_1 = |\mathbf{x}|^2$ and $f_2 = |\mathbf{x} - \mathbf{c}|^2$ with $\mathbf{c} = 2\cdot\mathbf{1}$. By the triangle inequality, for any $\mathbf{x}$
+
+\begin{equation}
+  \sqrt{f_1} + \sqrt{f_2} = |\mathbf{x}| + |\mathbf{x} - \mathbf{c}| \ \ge\ |\mathbf{c}| = 2\sqrt{5},
+\end{equation}
+
+with equality only when $\mathbf{x}$ lies on the segment joining $\mathbf{0}$ and $\mathbf{c}$. That segment is the Pareto set, and the Pareto front is $\sqrt{f_1} + \sqrt{f_2} = 2\sqrt{5}$. The distance of an archive point from it is therefore measured by $\delta = |\mathbf{x}| + |\mathbf{x} - \mathbf{c}| - 2\sqrt{5} \ (\ge 0)$. PSO with 40 particles ran 100 steps (the convergence thresholds were made small enough).
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.95\linewidth]{pareto.png}
+\caption{PSO and GA with two objectives. Left: in objective space, the archive of PSO, the first front of the last generation of GA and the exact Pareto front. Right: the distance $\delta$ from the Pareto set (maximum and mean over the archive for PSO, mean over the front for GA) and the size of the archive of PSO (dotted).}
+\label{fig:pareto}
+\end{figure}
+
+Figure~\ref{fig:pareto} shows the results. The final archive has 31 points, with a mean $\delta$ of 0.050 and a maximum of 0.30. The mean of $\delta$ falls by two orders of magnitude, from 11.7 at the first step to 0.13 at step 20, and then fluctuates between 0.04 and 0.20 without falling further. We take the reasons for this plateau to be that the archive is built from the particles of the current step only, so better points of earlier steps are not kept, and that the leader is chosen uniformly at random, so the swarm gathers on part of the front ($f_1$ between 1.8 and 8.6 in the final archive). To obtain the whole front in detail, choose the non-dominated points again from \texttt{output\_PSO.dat} over all steps (known issue 10).
+
+Solved by GA (40 individuals, 100 generations, survivor selection of NSGA-II), all 40 points of the last generation are in the first front and cover $f_1$ from 0.05 to 20.0, \textbf{the whole front up to both ends} (squares in Figure~\ref{fig:pareto}). The mean $\delta$ is 0.084 and the maximum 0.21: the mean is slightly larger than with PSO, the maximum smaller. The mean $\delta$ keeps falling to the end, 0.29 at generation 20 and 0.10 at generation 60, with no plateau as in PSO. GA keeps parents and children together, so good points survive across generations, and selects by crowding distance, so the points spread over the front. For the whole front with several objectives, and in particular for its ends, use GA.
+
+\subsection{Reproducibility}
+
+Run twice with the same seed, the \texttt{output\_global.dat} of the five cases of PSO, ABC and GA agreed bit for bit. In a serial run the answer of Borealis is fixed by the seed alone. With the concurrent evaluation of PSO and GA (\texttt{num\_parallel}) the random numbers are drawn outside the threads, so the answer is the same as in a serial run. The concurrent evaluation of ABC changes the answer in the employed phase only, and does not depend on the number of threads (both checked by tests). Under MPI each rank has its own random stream, and the answer changes with the number of processes.
+
+\subsection{Tests and CI}\label{sec:tests}
+
+\texttt{tests/} holds pytest tests, run by \texttt{python3 -m pytest tests} (42 tests, about 27~s on the development machine; the 3 of Bayesian optimization are skipped where bayesian-optimization is not installed):
+
+\begin{itemize}
+\item the tools of \texttt{orbital}: time units, the default path, the search for the corresponding point (checked against the former loop, and outside the range), the geodetic round trip, the check of objective values, and starting an external code (exit status, an old result file, and no MPI environment variables leaking to the child)
+\item the configuration check: warnings for unknown and obsolete keys, and no unknown key in any \texttt{borealis.yml} of the repository
+\item the methods end to end: convergence and reproducibility of PSO, the concurrent evaluation giving the serial answer, the sign of maximization, approach to the Pareto set with two objectives, a monotone best so far of ABC, ABC refusing several objectives, GA keeping crossover and mutation within the bounds, its non-dominated sorting, monotone best, reproducibility, concurrent evaluation and covering of the front with two objectives, and convergence, reproducibility, maximization and the refusal of unavailable models in Bayesian optimization
+\item MPI: PSO, ABC and GA with 13 candidates on 3 processes (only where \texttt{mpirun} exists)
+\item \texttt{shapeoptimizer} with a dummy external code without MPI: concurrent evaluation, one and two objectives, the core assignment, and the penalty on failure
+\end{itemize}
+
+On the sources of version 1.6, 16 of 18 of these tests fail, which confirms that the tests catch the bugs that were fixed. GitHub Actions (\texttt{.github/workflows/ci.yml}) runs the syntax check, the tests and the verification cases of this report with Python 3.9 and 3.12 on every push and pull request.
+
+\subsection{Speed of the concurrent evaluation}\label{sec:val-parallel}
+
+The concurrent evaluation of Section~\ref{sec:parallel-eval} was measured on an AMD Ryzen 9 9900X (12 physical cores, 24 logical) with Open MPI 4.1.6. Two external codes were used. One is a dummy MPI program that is started by \texttt{mpirun -np 2 --cpu-set}, sleeps for 2~s and writes the core binding of each rank (\texttt{sched\_getaffinity}). The other is the SU2 + preCICE case \texttt{testcase/work\_shapeoptimizer/work/work\_cylinder2D\_multiobj}, shortened to 6 particles and 2 steps. Both used \texttt{num\_parallel} = 3 and 2 cores per case.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.95\linewidth]{parallel_timeline.png}
+\caption{Timeline of the concurrent evaluation. Left: the dummy MPI program (colour = slot). Right: SU2 + preCICE (colour = group within a step).}
+\label{fig:parallel}
+\end{figure}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lrrrrr}
+\toprule
+external code & evaluations & one [s] & total [s] & one by one [s] & speed-up \\
+\midrule
+dummy MPI program & 18 & 2.00 & 15.0 & 36.0 & 2.4 \\
+SU2 + preCICE & 12 & 9.3--10.9 & 46.8 & 120.7 & 2.6 \\
+\bottomrule
+\end{tabular}
+\caption{Speed of the concurrent evaluation (\texttt{num\_parallel} = 3). ``One by one'' is the sum of the times of the evaluations.}
+\label{tab:parallel}
+\end{table}
+
+Figure~\ref{fig:parallel} and Table~\ref{tab:parallel} show the results.
+
+\begin{itemize}
+\item Three cases ran at a time, and the ranks of each case were bound to the cores assigned to it (0,1 / 2,3 / 4,5, with their SMT siblings), with no overlap
+\item The speed-up stays below the ideal 3 because of the gaps between the groups: 0.6~s for the dummy (the interval \texttt{polling\_interval} at which the result file is looked for was 0.2~s) and about 2~s for SU2 (the default of 3~s). PSO waits for all particles of a step, so the slowest case of a group sets its length. \textbf{When one evaluation is short, shorten \texttt{polling\_interval}}
+\item With the dummy made to fail always, all 6 evaluations returned \texttt{penalty\_failure} and the optimization ran to its end without stopping
+\end{itemize}
+
+It has not been checked yet in the job environment of a supercomputer (known issue 20). If the cores given to the job do not start at number 0, the absolute numbers of \texttt{--cpu-set} miss them.
+
+\subsection{Bayesian optimization}\label{sec:val-bo}
+
+The same five-dimensional sphere function was solved by Bayesian optimization (EI, $\xi = 0.01$, 10 initial points and 50 iterations; \texttt{report/verification/bo\_sphere}). The right of Figure~\ref{fig:convergence} shows the best so far against the number of evaluations, next to PSO and ABC.
+
+\begin{itemize}
+\item Bayesian optimization reached $f = 1.6 \times 10^{-3}$ at the 42nd evaluation and did not improve in the remaining 18
+\item To reach the same value, PSO needed 420 evaluations (21 steps), GA 840 (41 generations) and ABC about 1940 (48 steps)
+\item Beyond that accuracy (below $10^{-6}$), Bayesian optimization does not get within 60 evaluations. Fitting the Gaussian process and maximizing the acquisition took 12~s in all for the 60 evaluations (development machine)
+\end{itemize}
+
+Bayesian optimization suits external codes that are expensive per run, with tens of evaluations; PSO suits cheap evaluations where accuracy is needed. Run twice with the same seed, all points evaluated and their values agreed.
+
+\section{An application: atmospheric density from the orbit of the ISS}\label{sec:application}
+
+\texttt{testcase/work\_tacode\_fortran} has three examples that estimate the atmospheric density at 410--440~km from the orbit of the ISS. The reference orbit is the TLE of Celestrak propagated by SGP4 and reconstructed by Gaussian-process regression from intermittent pseudo GNSS observations. Tacode computes the orbit, and PSO (100 particles, 50 steps) searches for the density correction that makes the difference in altitude small. The three differ in how the correction is given.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabularx}{\linewidth}{lXrrr}
+\toprule
+case & correction & converged & objective & RMS of altitude \\
+\midrule
+\texttt{work\_tacode\_iss} & factor per altitude band (4 bands, a step function) & -- & 0.0008 & 0.06 km \\
+\texttt{work\_tacode\_iss\_pchip} & the same control points joined smoothly by PCHIP & 57 steps & 0.00095 & 0.071 km \\
+\texttt{work\_tacode\_iss\_f107} & the solar radio flux F10.7 optimized as a single quantity, the density rebuilt by NRLMSISE-00 & 42 steps & 0.00089 & 0.067 km \\
+\bottomrule
+\end{tabularx}
+\caption{Results of the ISS examples. The numbers are taken from the record of the runs of August 2026 (\texttt{CHANGELOG.md}); they were not recomputed for this report.}
+\end{table}
+
+All three fit the orbit about equally well, and the F10.7 approach does so with a single physically interpretable quantity (F10.7A $\approx$ 128). The reference orbit, however, comes from SGP4 and not from a measured density, so the correction largely absorbs the difference between the orbit model of Tacode and SGP4. It should not be read directly as the physical atmospheric density.
+
+Two problems that silently corrupted the objective were found along the way: the confusion of sidereal and calendar days of Section~\ref{sec:adapters} (known issue 23), and the atmosphere table of Tacode not covering the altitude of the ISS, so that the density correction had in fact no effect (known issue 24). Both were found not from the value of the objective but by looking at the orbit and the density profile of the best solution in figures.
+
+\section{Known issues}\label{sec:known-issues}
+
+The list and the details are in the development record kept outside the repository. Version 1.7.0 implemented GA, replaced the library of Bayesian optimization by bayesian-optimization (22) and fixed the issues that silently corrupted the answer (the sign of maximization, NaN, the factor of \texttt{hour}, the wrap-round of the corresponding time, failures of the external code, the default path, \texttt{shapeoptimizer} with one objective) and covers them by tests. What remains:
+
+\begin{itemize}
+\item Unknown keys give a warning but do not stop the run (4)
+\item The convergence check of ABC can hold at a step without improvement (5)
+\item The PSO archive and leader are chosen from the particles of the current step only, and neither positions nor velocities are limited (10, 21)
+\item The penalty is a constant that does not depend on the size of the violation (13)
+\item The concurrent evaluation is not available in Bayesian optimization and only in some adapters (17); the core assignment on a supercomputer is not checked yet (20)
+\item The \texttt{weight\_time} of \texttt{tacode} does not enter the error (27)
+\end{itemize}
+
+\begin{thebibliography}{99}
+\bibitem{kennedy1995} J. Kennedy and R. Eberhart, ``Particle swarm optimization,'' \textit{Proc. ICNN'95}, vol.~4, pp.~1942--1948, 1995.
+\bibitem{shi1998} Y. Shi and R. Eberhart, ``A modified particle swarm optimizer,'' \textit{Proc. IEEE ICEC}, pp.~69--73, 1998.
+\bibitem{coello2004} C. A. Coello Coello, G. T. Pulido, and M. S. Lechuga, ``Handling multiple objectives with particle swarm optimization,'' \textit{IEEE Trans. Evol. Comput.}, vol.~8, no.~3, pp.~256--279, 2004.
+\bibitem{karaboga2005} D. Karaboga, ``An idea based on honey bee swarm for numerical optimization,'' Technical Report TR06, Erciyes University, 2005.
+\bibitem{karaboga2007} D. Karaboga and B. Basturk, ``A powerful and efficient algorithm for numerical function optimization: artificial bee colony (ABC) algorithm,'' \textit{J. Global Optim.}, vol.~39, pp.~459--471, 2007.
+\bibitem{jones1998} D. R. Jones, M. Schonlau, and W. J. Welch, ``Efficient global optimization of expensive black-box functions,'' \textit{J. Global Optim.}, vol.~13, pp.~455--492, 1998.
+\bibitem{deb1995} K. Deb and R. B. Agrawal, ``Simulated binary crossover for continuous search space,'' \textit{Complex Systems}, vol.~9, pp.~115--148, 1995.
+\bibitem{deb1996} K. Deb and M. Goyal, ``A combined genetic adaptive search (GeneAS) for engineering design,'' \textit{Computer Science and Informatics}, vol.~26, no.~4, pp.~30--45, 1996.
+\bibitem{deb2002} K. Deb, A. Pratap, S. Agarwal, and T. Meyarivan, ``A fast and elitist multiobjective genetic algorithm: NSGA-II,'' \textit{IEEE Trans. Evol. Comput.}, vol.~6, no.~2, pp.~182--197, 2002.
+\bibitem{bayesopt} F. Nogueira and contributors, ``Bayesian Optimization: Open source constrained global optimization tool for Python,'' \url{https://github.com/bayesian-optimization/BayesianOptimization}, version 3.4.0, 2026.
+\bibitem{gpyopt2016} The GPyOpt authors, ``GPyOpt: A Bayesian optimization framework in Python,'' \url{http://github.com/SheffieldML/GPyOpt}, 2016.
+\bibitem{takahashi2022} Y. Takahashi, M. Saito, N. Oshima, and K. Yamada, ``Trajectory reconstruction for nanosatellite in very low Earth orbit using machine learning,'' \textit{Acta Astronautica}, vol.~194, pp.~301--308, 2022.
+\bibitem{sakai2024} T. Sakai and Y. Takahashi, ``Atmospheric density estimation in very low Earth orbit based on nanosatellite measurement data using machine learning,'' \textit{Aerospace Science and Technology}, vol.~153, 109418, 2024.
+\end{thebibliography}
+
+\end{document}

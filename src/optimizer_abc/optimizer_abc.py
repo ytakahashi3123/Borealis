@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import numpy as np
+from concurrent.futures import ThreadPoolExecutor
 from orbital.orbital import orbital
 
 
@@ -113,9 +114,53 @@ class optimizer_abc(orbital):
     # 設定の読み込み
     num_optiter = config['ABC']['num_optiter']
     num_employ_bees = config['ABC']['num_employ_bees']
-    num_onlook_bees = config['ABC']['num_onlook_bee']
-    visit_limit = config['ABC']['vist_limit']
+    # 正しい綴りのキーも受け付ける（vist_limit・num_onlook_bee は誤った綴りのまま公式になっていた。既知の問題 4）
+    num_onlook_bees = config['ABC'].get('num_onlook_bees', config['ABC'].get('num_onlook_bee'))
+    visit_limit = config['ABC'].get('visit_limit', config['ABC'].get('vist_limit'))
+    if num_onlook_bees is None or visit_limit is None:
+      super().stop_program('[ABC-Borealis] Error: ABC.num_onlook_bees (num_onlook_bee) and ABC.visit_limit (vist_limit) are required', self.mpi_instance)
+    # 収束判定で何ステップ前の解と比べるか（既定 1 = 前のステップ）
+    windowsize_residual = int( config['ABC'].get('windowsize_residual', 1) )
     num_dimension = self.num_dimension
+
+    # Maximization or minimization of the objective function (PSOと同様の仕組み)
+    flag_Maximization_of = config['ABC'].get('maximize', False)
+    if not isinstance(flag_Maximization_of, bool):
+      raise ValueError("[ABC-Borealis] Error: config['ABC']['maximize'] must be True or False.")
+    sign_of = -1.0 if flag_Maximization_of else 1.0
+    super().check_maximize_supported(objective_function, flag_Maximization_of, 'ABC', self.mpi_instance)
+
+    # ABC は単目的だけ（既知の問題 12）
+    num_objectives = config.get('objectives', {}).get('num_objectives', 1)
+    if num_objectives != 1:
+      super().stop_program(f'[ABC-Borealis] Error: ABC supports a single objective only (objectives.num_objectives = {num_objectives})', self.mpi_instance)
+
+    # 目的関数が NaN・無限大を返したときに置き換える値（既知の問題 2）
+    value_nonfinite = float( config['parameter_optimized'].get('value_nonfinite', 1.0e+30) )
+    def evaluate(x, unique_id, step):
+      score = objective_function(self.reshape_array(x, num_dimension), unique_id, step, sign_of)
+      return float( self.sanitize_score(score, 1, value_nonfinite, 'ABC')[0] )
+
+    # 1 プロセスの中で同時に評価する数（スレッド）。外部コード(MPI並列)を呼ぶアダプタ向けで、PSO・GA と同じ仕組み。
+    # 候補はどの段でも、乱数を引く順序を変えずにまとめて作ってから評価する。
+    # 初期化・追従蜂・偵察蜂は段の中で候補が互いに依存しないので、num_parallel によらず以前と同じ答えになる。
+    # 雇用蜂だけは、逐次では先に更新された食料源を後の蜂が参照するので、num_parallel > 1 では段の始まりの
+    # 食料源から候補を作る（MPI でランクをまたぐときと同じ形）。このときは逐次と答えが変わる
+    num_parallel = int( config['ABC'].get('num_parallel', 1) )
+    if num_parallel > 1:
+      adapter_instance = getattr(objective_function, '__self__', None)
+      if not getattr(adapter_instance, 'flag_parallel_evaluation', False):
+        super().stop_program(f'[ABC-Borealis] Error: ABC.num_parallel > 1 is not supported by the selected adapter: {type(adapter_instance).__name__}', self.mpi_instance)
+      print(f'[ABC-Borealis] Number of concurrent evaluations: {num_parallel}')
+      executor = ThreadPoolExecutor(max_workers=num_parallel)
+    else:
+      executor = None
+
+    def evaluate_batch(candidates):
+      # candidates: (x, unique_id, step) の並び。結果は同じ順序で返る
+      if executor is None:
+        return [ evaluate(x, unique_id, step) for x, unique_id, step in candidates ]
+      return list( executor.map(lambda c: evaluate(*c), candidates) )
 
     # 各プロセスの担当範囲を決定
     # 例: 80個を4プロセスなら、各20個
@@ -134,12 +179,15 @@ class optimizer_abc(orbital):
     current_ids = np.zeros(num_employ_bees, dtype=int)
 
     # --- 1. Initialization (担当分のみ計算) ---
+    candidates = []
     for i in my_indices:
       food_source[i] = self.generate_food_source(parameter_boundary)
       # 重複しないIDを生成
       unique_id = self.generate_unique_id(0, 0, i+1, rank+1)
-      solution[i] = objective_function(self.reshape_array(food_source[i], num_dimension), unique_id)
-      current_ids[i] = unique_id 
+      candidates.append( (food_source[i].copy(), unique_id, 0) )
+      current_ids[i] = unique_id
+    for i, sol in zip(my_indices, evaluate_batch(candidates)):
+      solution[i] = sol
 
     # 初期化時の同期
     if self.mpi_instance.flag_mpi :
@@ -154,12 +202,18 @@ class optimizer_abc(orbital):
 
     best_solution = np.min(solution)
     best_food_source = food_source[np.argmin(solution)].copy()
+    best_id = int(current_ids[np.argmin(solution)])
 
     # History
     best_index_history = np.zeros(num_optiter, dtype=int)
     food_source_history = np.zeros((num_optiter, num_employ_bees, num_dimension))
     solution_history = np.zeros((num_optiter, num_employ_bees))
     residaul_mean_history = []
+    # それまでの最良の履歴（output_global.dat に書く。以前はそのステップの食料源の中の最良を書いていた。既知の問題 16）
+    best_solution_history = np.zeros(num_optiter)
+    best_food_source_history = np.zeros((num_optiter, num_dimension))
+    best_id_history = np.zeros(num_optiter, dtype=int)
+    solution_window = [ solution.copy() ]
 
     solution_init = solution.copy()
     solution_prev = solution.copy()
@@ -167,27 +221,37 @@ class optimizer_abc(orbital):
     # --- Iteration ---
     for n in range(num_optiter):
       # --- 1. Employed bee phase (担当分のみ探索) ---
-      for i in my_indices:
+      def employed_candidate(i):
         # 更新する次元を1つ選ぶ (k) と、比較対象を選ぶ (j != i)
         k = np.random.randint(num_dimension)
         j = np.random.choice([idx for idx in range(num_employ_bees) if idx != i])
         phi = np.random.uniform(-1, 1)
-        
         v = food_source[i].copy()
         v[k] = food_source[i, k] + phi * (food_source[i, k] - food_source[j, k])
         # 境界チェック（クリッピング）
         v[k] = np.clip(v[k], parameter_boundary[k][0], parameter_boundary[k][1])
-        
-        unique_id = self.generate_unique_id(n+1, 1, i+1, rank+1)
-        sol_v = objective_function(self.reshape_array(v, num_dimension), unique_id )
+        return v, self.generate_unique_id(n+1, 1, i+1, rank+1)
+
+      def employed_update(i, v, unique_id, sol_v):
         if self.fitness_value_function(sol_v) > self.fitness_value_function(solution[i]):
           food_source[i] = v
           solution[i] = sol_v
           visit_counter[i] = 0
-          current_ids[i] = unique_id
         else:
           visit_counter[i] += 1
-          current_ids[i] = unique_id
+        current_ids[i] = unique_id
+
+      if executor is None:
+        # 逐次: 先に更新された食料源を後の蜂が参照する（以前と同じ）
+        for i in my_indices:
+          v, unique_id = employed_candidate(i)
+          employed_update(i, v, unique_id, evaluate(v, unique_id, n))
+      else:
+        # 並列: 段の始まりの食料源から候補をまとめて作り、同時に評価してから順に採否を決める
+        candidates = [ (i,) + employed_candidate(i) for i in my_indices ]
+        results = evaluate_batch( [ (v, unique_id, n) for i, v, unique_id in candidates ] )
+        for (i, v, unique_id), sol_v in zip(candidates, results):
+          employed_update(i, v, unique_id, sol_v)
       
       # フェーズ終了後に全プロセスを同期
       if self.mpi_instance.flag_mpi :
@@ -196,44 +260,69 @@ class optimizer_abc(orbital):
       # --- 2. Onlooker bee phase ---
       fitness_values = [self.fitness_value_function(s) for s in solution]
       # 追従蜂も担当を分ける (sizeで割る)
-      my_onlook_count = num_onlook_bees // size + (1 if rank < num_onlook_bees % size else 0)
-      
+      onlook_base  = num_onlook_bees // size
+      onlook_rem   = num_onlook_bees % size
+      my_onlook_count = onlook_base + (1 if rank < onlook_rem else 0)
+      # 自分より前のランクが担当した追従蜂数の合計（一意なbee_idxを作るためのオフセット）
+      onlook_offset = rank * onlook_base + min(rank, onlook_rem)
+
+      # 選択先 i は全食料源からルーレット選択されるため、自分の担当範囲(my_indices)外を
+      # 更新することがある。以前は _sync_all() が担当範囲外の更新を0クリアしてから
+      # Allreduce(SUM) していたため、担当外への更新が消失するバグがあった。
+      # そのため、更新内容を一旦ローカルに集めてから全ランクでallgatherし、
+      # 全プロセスが同一の順序で適用することで、どのランクが選んだ更新も失わないようにする。
+      # 更新は段の終わりにまとめて適用するので、候補はまとめて作ってから評価してよい（逐次と同じ答え）
+      onlook_candidates = []
       for m_idx in range(my_onlook_count):
         i = self.roulette_wheel_selection(fitness_values)
         # 雇用蜂と同じ近傍探索を行う
         k = np.random.randint(num_dimension)
         j = np.random.choice([idx for idx in range(num_employ_bees) if idx != i])
         phi = np.random.uniform(-1, 1)
-        
+
         v = food_source[i].copy()
         v[k] = food_source[i, k] + phi * (food_source[i, k] - food_source[j, k])
         v[k] = np.clip(v[k], parameter_boundary[k][0], parameter_boundary[k][1])
 
-        unique_id = self.generate_unique_id(n+1, 2, (m_idx+my_onlook_count*rank)+1, rank+1)
-        sol_v = objective_function(self.reshape_array(v, num_dimension), unique_id)
-        # ここで i は自分の担当外の可能性もあるが、計算効率のため「自分が選んだ i 」の更新に責任を持つ
-        if self.fitness_value_function(sol_v) > self.fitness_value_function(solution[i]):
-          food_source[i] = v
-          solution[i] = sol_v
-          visit_counter[i] = 0
-          current_ids[i] = unique_id
-        else:
-          visit_counter[i] += 1
-          current_ids[i] = unique_id
+        unique_id = self.generate_unique_id(n+1, 2, onlook_offset+m_idx+1, rank+1)
+        onlook_candidates.append( (i, v, unique_id) )
+      onlook_results = evaluate_batch( [ (v, unique_id, n) for i, v, unique_id in onlook_candidates ] )
+      local_onlook_updates = []
+      for (i, v, unique_id), sol_v in zip(onlook_candidates, onlook_results):
+        accepted = self.fitness_value_function(sol_v) > self.fitness_value_function(solution[i])
+        local_onlook_updates.append( (i, accepted, v if accepted else None, sol_v if accepted else None, unique_id) )
 
       if self.mpi_instance.flag_mpi :
-        self._sync_all(MPI, rank, size, comm, food_source, solution, visit_counter, current_ids)
+        gathered_onlook_updates = comm.allgather(local_onlook_updates)
+      else:
+        gathered_onlook_updates = [local_onlook_updates]
+
+      # 全プロセスが同一の順序（ランク順→蜂順）で適用するため、最終状態は全ランクで一致する
+      for updates_from_rank in gathered_onlook_updates:
+        for i, accepted, v, sol_v, unique_id in updates_from_rank:
+          if accepted:
+            food_source[i] = v
+            solution[i] = sol_v
+            visit_counter[i] = 0
+          else:
+            visit_counter[i] += 1
+          current_ids[i] = unique_id
 
       # --- 3. Scout bee phase ---
+      scout_candidates = []
       for local_idx in my_indices:
         if visit_counter[local_idx] > visit_limit:
           unique_id = self.generate_unique_id(n+1, 3, local_idx+1, rank+1)
-          # 新しい蜜源の生成と評価
+          # 新しい蜜源の生成
           food_source[local_idx] = self.generate_food_source(parameter_boundary)
-          solution[local_idx] = objective_function(self.reshape_array(food_source[local_idx], num_dimension), unique_id)
+          scout_candidates.append( (local_idx, unique_id) )
           current_ids[local_idx] = unique_id
           # カウンターリセット
           visit_counter[local_idx] = 0
+      # 新しい蜜源の評価
+      scout_results = evaluate_batch( [ (food_source[local_idx].copy(), unique_id, n) for local_idx, unique_id in scout_candidates ] )
+      for (local_idx, unique_id), sol in zip(scout_candidates, scout_results):
+        solution[local_idx] = sol
   
       # 重要：スカウトによって更新された情報を全プロセスに波及させる     
       if self.mpi_instance.flag_mpi :
@@ -245,24 +334,35 @@ class optimizer_abc(orbital):
       if solution[current_min_idx] < best_solution:
         best_solution = solution[current_min_idx]
         best_food_source = food_source[current_min_idx].copy()
+        best_id = int(current_ids[current_min_idx])
+      best_solution_history[n] = best_solution
+      best_food_source_history[n] = best_food_source
+      best_id_history[n] = best_id
 
       food_source_history[n] = food_source.copy()
       solution_history[n] = solution.copy()
       best_index_history[n] = current_min_idx
       id_history[n] = current_ids.copy()
 
-      residual = np.abs((solution - solution_prev) / (solution_init + 1e-20))
+      # windowsize_residual ステップ前の解との相対変化。分母は初期値の絶対値
+      # （以前は初期値そのもので、負の値だと残差が負になって即座に収束としていた）
+      solution_window.append( solution.copy() )
+      solution_prev = solution_window[ max(0, len(solution_window) - 1 - windowsize_residual) ]
+      residual = np.abs((solution - solution_prev) / (np.abs(solution_init) + 1e-20))
       residual_mean = np.mean(residual)
       residaul_mean_history.append(residual_mean)
 
       if rank == 0:
         print(f'Step: {n+1}, Best: {best_solution:.5e}, Residual: {self.text_color}{residual_mean:.10e}{self.text_end}')
 
-      if residual_mean <= config['ABC']['tolerance']:
+      # 最初の windowsize_residual ステップは判定しない（1 ステップ目で更新が無いと残差 0 で打ち切られていた。既知の問題 5）
+      if n + 1 > windowsize_residual and residual_mean <= config['ABC']['tolerance']:
         num_optiter = n + 1
         break
       
-      solution_prev = solution.copy()
+
+    if executor is not None:
+      executor.shutdown()
 
     # Output
     if rank == 0:
@@ -280,7 +380,10 @@ class optimizer_abc(orbital):
             self.str_food_source: food_source_history[:num_optiter],
             self.str_error: solution_history[:num_optiter],
             self.str_best_index: best_index_history[:num_optiter],
-            self.str_id_history: id_history[:num_optiter]
+            self.str_id_history: id_history[:num_optiter],
+            'best_solution': best_solution_history[:num_optiter],
+            'best_food_source': best_food_source_history[:num_optiter],
+            'best_id': best_id_history[:num_optiter]
         }
 
     return best_food_source, best_solution, solution_dict
@@ -394,13 +497,12 @@ class optimizer_abc(orbital):
     header_tmp = header_tmp.rstrip(',') + '\n'
     file_output.write( header_tmp )
 
+    # それまでの最良（偵察蜂が最良の食料源を捨てても悪化しない）
     for n in range(0, num_optiter):
-      i_opt = best_index_history[n]
-      g_id  = id_history[n,i_opt]
-      text_tmp = str(n+1) + ', ' + str(g_id) + ', ' 
-      text_tmp = text_tmp + str(solution_history[n, i_opt]) +  ', ' 
+      text_tmp = str(n+1) + ', ' + str(solution_dict['best_id'][n]) + ', '
+      text_tmp = text_tmp + str(solution_dict['best_solution'][n]) +  ', '
       for m in range(0,num_dimension):
-        text_tmp = text_tmp + str( food_source_history[n, i_opt, m] ) + ', '
+        text_tmp = text_tmp + str( solution_dict['best_food_source'][n, m] ) + ', '
       text_tmp = text_tmp.rstrip(',') + '\n'
       file_output.write( text_tmp )
     file_output.close()

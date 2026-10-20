@@ -1,9 +1,0 @@
-# Configuration file for deleting non-optimal solutions
-
-# Optimal solution list
-filename_extract_list: result_PSO/output_global.dat
-
-# Directory information
-work_dir: work_tacode
-case_dir: case
-step_digit: 4

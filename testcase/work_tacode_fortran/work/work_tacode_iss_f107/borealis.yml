@@ -1,0 +1,134 @@
+# Configuration file for Borealis code
+# ISS density estimation trial (F10.7-driven NRLMSISE-00 atmosphere)
+
+adapter:
+  # tacode, simple_function, or example_externalcode
+  kind_adapter: tacode
+
+
+optimizer:
+  # Bayesian_optimization or PSO
+  #kind_optimizer: Bayesian_optimization
+  kind_optimizer: PSO
+
+
+objectives:
+   num_objectives: 1
+
+
+parameter_optimized:
+  # Parameter boundaries
+  boundary:
+#    - name: '# Initial coordinate'
+#      component:
+#        - type: coord_longitude # Degree
+#          bound_min: -179.1208113957
+#          bound_max: -179.1208113957
+#        - type: coord_latitude  # Degree
+#          bound_min: 0.0000170734
+#          bound_max: 0.0000170734
+#        - type: coord_altitude # meter in Tacode-Fotran
+#          bound_min: 417156.541931
+#          bound_max: 417156.541931
+    - name: '# Initial velocity'
+      component:
+        - type: longitude
+          bound_min: 4240
+          bound_max: 4280
+        - type: latitude
+          bound_min: 5990
+          bound_max: 6030
+        - type: altitude
+          bound_min: -14
+          bound_max: -10
+    - name: '# fa10.7'
+      component:
+        - type: f107a
+          bound_min: 100
+          bound_max: 250
+  # Penalty
+  flag_penalty: True
+  penalty_value: 1000.0
+
+  flag_with_timeerror: False
+  set_altitude:
+   - 490 #km
+  set_count_pass: 1 # 設定高度を何回通り過ぎた点同士で時間差計算を行うか
+  weight_time:  0.001 # Added by Tomoki Sakai 2023/3/7 誤差計算の時間項にかける定数　dafault : 1
+
+PSO: # Particle swarm optimization
+  # Number of iterations
+  num_optiter: 100
+
+  # Number of particles
+  num_particle: 50
+
+  # Minimize or maximize the objective function
+  maximize: False
+
+  # Tolerance of convergence
+  windowsize_residual: 3     # 残差：このステップ数以降に収束判定を開始する
+  tolerance_residual: 1.e-5 # 粒子ベスト値残差の収束判定(前ステップとの差)
+  windowsize_archive: 2      # アーカイブ重心：このステップ数以降に収束判定を開始する
+  tolerance_archive: 1.0     # アーカイブスコアの重心変化がこの値に収まっていれば収束判定
+
+  # Particle parameter for PSO
+  inertia: 0.5
+  cognitive_coef: 1.5
+  social_coef: 1.5
+
+  # Results data file (Tecplot data format)
+  result_dir: result_PSO
+  filename_output: output_PSO.dat
+  filename_global: output_global.dat
+
+reference:
+
+  directory_path_specify: manual # default or manual
+  manual_path: ../../reference/iss_tle/output
+  filename_input: trajectory.dat
+
+  var_x: time_day
+  var_y:
+    - longitude
+    - latitude
+    - altitude
+
+  timeunit: day
+
+
+tacode:
+
+  # Code system: python3 (tacode ver2.0) or Fortran (tacoed ver1.0)
+  code_system: fortran
+
+  # tacode case directory
+  work_dir: work_tacode_iss_f107
+  case_dir: case
+  step_digit: 4
+
+  directory_path_specify: manual # default or manual
+  manual_path: ../../template/work_tacode_iss_f107
+
+  # Executing script
+  cmd_code: ./run_tacode.sh
+
+  # Control file
+  filename_control: orbit.ctl
+
+  # Result file name computed by Tacode
+  filename_result: trajectory.dat
+
+  # Tiem variables (Tacodeではsecondで出力されるのでその変換を行う)
+  convert_timeunit_tapost: sec2day
+
+  # 時刻にオフセットを与える（Tacodeでは0secondが計算開始時刻なので、サンプル・最適化結果と比較用するときはこれをつかう）
+  # 時刻オフセット値はここで決定する（ISS TLE伝播開始時刻、単位:年初からの経過日数）
+  time_start: 233.5005338299
+  time_end:   233.5653486447
+  target_time: 233.5005338299
+
+  # Result trajectory of Tacode
+  result_dir: result_tacode
+  flag_output: False
+  filename_output: output_result.dat

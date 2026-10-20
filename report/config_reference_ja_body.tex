@@ -1,0 +1,553 @@
+% このファイルは md_to_tex.py が config_reference_ja.md から作る。直接は直さないこと
+\section{この表の読み方}
+
+この文書は、Borealis が読む設定ファイル \texttt{borealis.\allowbreak{}yml} に書けるキーを、セクションごとにすべて並べたものである。
+\textbf{2026 年 10 月 20 日の時点のソース（version 1.7.0）}に合わせてある。
+キーは \texttt{src/\allowbreak{}} の Python が \texttt{config[.\allowbreak{}.\allowbreak{}.\allowbreak{}]\allowbreak{}} と \texttt{config.\allowbreak{}get(.\allowbreak{}.\allowbreak{}.\allowbreak{})} で読む箇所をすべて拾って作った（\texttt{previous/\allowbreak{}} と、外してある \texttt{optimizer\_\allowbreak{}ga} は除く）。
+
+表の列は次のとおりである。
+
+\begin{itemize}
+\item \textbf{キー}：セクションからの道筋。リストの要素は \texttt{[]\allowbreak{}} で書いた（\texttt{boundary[]\allowbreak{}.\allowbreak{}component[]\allowbreak{}.\allowbreak{}bound\_\allowbreak{}min} など）
+\item \textbf{既定}：「必須」は書かないと \texttt{KeyError} で止まるもの。「必須\textbackslash{}*」は、ある条件のときだけ必須のもの（条件は説明に書いた）。値が書いてあるものは省略でき、そのときの値である
+\item \textbf{選べる値}：語で書くキーは語の一覧、数値のキーは意味と単位
+\item \textbf{説明・注意}：何に効くか、どの組み合わせで意味を持つか、気をつける点
+\end{itemize}
+
+既知の問題は、リポジトリの外に置いた開発の記録の番号で示す（「既知の問題 4」など）。
+
+\section{設定ファイルの書き方}
+
+\subsection{枠は YAML}
+
+設定ファイルは YAML で書く。最上位のキーはおおむね「モジュールの名前 = セクションの名前」になっている。
+
+\begin{Verbatim}
+adapter:
+  kind_adapter: simple_function
+optimizer:
+  kind_optimizer: PSO
+objectives:
+  num_objectives: 1
+parameter_optimized:
+  boundary:
+    - name: 'simple_function'
+      component:
+        - {type: x1, bound_min: -10, bound_max: 10}
+        - {type: x2, bound_min: -10, bound_max: 10}
+  flag_penalty: False
+PSO:
+  num_optiter: 100
+  num_particle: 20
+  ...
+simple_function:
+  ...
+\end{Verbatim}
+
+\begin{itemize}
+\item \textbf{既定では、作業ディレクトリの \texttt{borealis.\allowbreak{}yml} を読む。} 別の場所のファイルは \texttt{python3 src/\allowbreak{}borealis.\allowbreak{}py -file path/\allowbreak{}to/\allowbreak{}borealis.\allowbreak{}yml} で渡す。相対のパスは、すべて作業ディレクトリから解く
+\item \textbf{選んでいないセクションは読まない。} \texttt{kind\_\allowbreak{}optimizer: PSO} のとき、\texttt{ABC} や \texttt{Bayesian\_\allowbreak{}optimization} のセクションは書いてあっても無視される。雛形の yml に他のセクションが並んでいるのはこのため
+\item \textbf{知らないキーは、起動時に警告が出る}（\texttt{Warning in borealis.\allowbreak{}yml : PSO.\allowbreak{}num\_\allowbreak{}particles: unknown key,\allowbreak{} not read} など。\texttt{src/\allowbreak{}config\_\allowbreak{}check/\allowbreak{}}）。止めはしないので、\textbf{警告を読むこと}。読まれるが効かないキー、古い綴りのキーも警告する（既知の問題 4）
+\item \textbf{起動すると消されるディレクトリがある。} \texttt{<オプティマイザ>.\allowbreak{}result\_\allowbreak{}dir} と \texttt{<アダプタ>.\allowbreak{}work\_\allowbreak{}dir}（多くのアダプタでは \texttt{<アダプタ>.\allowbreak{}result\_\allowbreak{}dir} も）は、起動したときに中身ごと消して作り直す。残したい結果のあるディレクトリを指さないこと
+\end{itemize}
+
+\subsection{テンプレートの場所の指定}
+
+外部コードを呼ぶアダプタは、テンプレートのケースの場所とリファレンスの場所を、どちらも次の 2 つのキーで指定する。
+
+\begin{itemize}
+\item \texttt{directory\_\allowbreak{}path\_\allowbreak{}specify}：\texttt{manual} なら \texttt{manual\_\allowbreak{}path} を使う。\texttt{default}・\texttt{auto} なら \texttt{src/\allowbreak{}orbital/\allowbreak{}} からの既定の場所を使う。それ以外の語は止まる
+\item \texttt{manual\_\allowbreak{}path}：\texttt{default} のときも、書いていないと \texttt{KeyError} で止まる
+\end{itemize}
+
+\texttt{default}・\texttt{auto} は、1.7.0 で直るまでパスの連結に区切りが抜けていて使えなかった（既知の問題 26）。既定の場所は雛形の配置に合わせたものなので、ふつうは \texttt{manual} で書く。
+
+\subsection{外部コードの実行}
+
+\texttt{cmd\_\allowbreak{}code}（\texttt{example\_\allowbreak{}externalcode} だけは \texttt{cmd\_\allowbreak{}externalcode}）は、シェルを通さずに 1 つの実行ファイルとして起動する。
+\textbf{引数は付けられない。} 引数が要るなら、それを書いたシェルスクリプトを置いて、その名前を書く。
+\textbf{終了ステータスが 0 でないか、結果のファイルが書かれなければ、評価の失敗}として扱い、目的関数の値は \texttt{parameter\_\allowbreak{}optimized.\allowbreak{}value\_\allowbreak{}nonfinite} になる。テンプレートから写した古い結果のファイルは、起動の前に消す。
+実行ファイルは、ケースのディレクトリ（テンプレートを写したもの）の中で起動するので、\texttt{.\allowbreak{}/\allowbreak{}run\_\allowbreak{}code.\allowbreak{}sh} のように書くのがふつうである。実行の権限を付けておくこと。
+
+\section{adapter と optimizer}
+
+\begingroup\small
+\begin{longtable}{>{\raggedright\arraybackslash}p{\dimexpr 0.2686\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.1293\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.1791\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.4179\linewidth-2\tabcolsep\relax}}
+\toprule
+\textbf{キー} & \textbf{既定} & \textbf{選べる値} & \textbf{説明・注意} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{キー} & \textbf{既定} & \textbf{選べる値} & \textbf{説明・注意} \\
+\midrule
+\endhead
+\bottomrule
+\endlastfoot
+\texttt{adapter.\allowbreak{}kind\_\allowbreak{}adapter} & 必須 & \texttt{tacode}・\texttt{simple\_\allowbreak{}function}・\texttt{example\_\allowbreak{}externalcode}・\texttt{heatcond}・\texttt{cage}・\texttt{shapeoptimizer}・\texttt{user} & 目的関数を与えるアダプタ。\texttt{src/\allowbreak{}adapter\_\allowbreak{}<名前>/\allowbreak{}} のクラスを読む（\texttt{simple\_\allowbreak{}function} と \texttt{example\_\allowbreak{}externalcode} は \texttt{src/\allowbreak{}adapter\_\allowbreak{}template/\allowbreak{}}、\texttt{user} は \texttt{src/\allowbreak{}hidden\_\allowbreak{}adapter\_\allowbreak{}user/\allowbreak{}}）。一覧に無い語は案内を出して止まる \\
+\texttt{optimizer.\allowbreak{}kind\_\allowbreak{}optimizer} & 必須 & \texttt{PSO}・\texttt{ABC}・\texttt{GA}・\texttt{Bayesian\_\allowbreak{}optimization} & 最適化の手法 \\
+\texttt{optimizer.\allowbreak{}seed} & 無し（毎回変わる） & 整数 & 乱数の種。MPI では各ランクを \texttt{seed + rank} で初期化する。逐次の実行では、同じ種なら同じ答えになる \\
+\end{longtable}
+\endgroup
+
+\section{objectives}
+
+\begingroup\small
+\begin{longtable}{>{\raggedright\arraybackslash}p{\dimexpr 0.2686\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.1293\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.1791\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.4179\linewidth-2\tabcolsep\relax}}
+\toprule
+\textbf{キー} & \textbf{既定} & \textbf{選べる値} & \textbf{説明・注意} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{キー} & \textbf{既定} & \textbf{選べる値} & \textbf{説明・注意} \\
+\midrule
+\endhead
+\bottomrule
+\endlastfoot
+\texttt{objectives.\allowbreak{}num\_\allowbreak{}objectives} & 1（PSO・GA）／必須（\texttt{simple\_\allowbreak{}function}） & 整数 & 目的関数の数。2 以上で PSO は非劣解のアーカイブ、GA は NSGA-II の多目的になる。出力の \texttt{Error\_\allowbreak{}k}・\texttt{Objective\_\allowbreak{}k} の列の数もこれで決まる。\textbf{ABC とベイズ最適化は単目的だけ} \\
+\end{longtable}
+\endgroup
+
+\section{parameter\_optimized}
+
+\subsection{最適化するパラメータ}
+
+\begingroup\small
+\begin{longtable}{>{\raggedright\arraybackslash}p{\dimexpr 0.2686\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.1293\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.1791\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.4179\linewidth-2\tabcolsep\relax}}
+\toprule
+\textbf{キー} & \textbf{既定} & \textbf{選べる値} & \textbf{説明・注意} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{キー} & \textbf{既定} & \textbf{選べる値} & \textbf{説明・注意} \\
+\midrule
+\endhead
+\bottomrule
+\endlastfoot
+\texttt{parameter\_\allowbreak{}optimized.\allowbreak{}boundary} & 必須 & リスト & 探索する範囲。各要素の \texttt{component} を順に並べたものが、パラメータのベクトルになる。\texttt{simple\_\allowbreak{}function} は読まない。\textbf{\texttt{user} はここでなく \texttt{Bayesian\_\allowbreak{}optimization.\allowbreak{}boundary} を読む} \\
+\texttt{boundary[]\allowbreak{}.\allowbreak{}name} & 必須 & 文字列 & 制御ファイルの中で書き換える変数を探す手がかり。\textbf{アダプタごとに使い方が違う}（下の表）。ベイズ最適化は表示に使うだけ \\
+\texttt{boundary[]\allowbreak{}.\allowbreak{}component} & 必須 & リスト & その変数の成分（次元）。\texttt{shapeoptimizer} では、すべての要素で成分の数がそろっていないと止まる \\
+\texttt{boundary[]\allowbreak{}.\allowbreak{}component[]\allowbreak{}.\allowbreak{}type} & 必須 & 文字列 & 成分の名前。出力ファイルの列の名前になる \\
+\texttt{boundary[]\allowbreak{}.\allowbreak{}component[]\allowbreak{}.\allowbreak{}bound\_\allowbreak{}min}・\texttt{bound\_\allowbreak{}max} & 必須 & 数値 & 探索の下限と上限。PSO・ABC・ベイズ最適化は初期値をこの中から取る。ABC は候補をこの中に切り詰める。\textbf{PSO は切り詰めない}（既知の問題 21）。ペナルティの判定にも使う \\
+\end{longtable}
+\endgroup
+
+\texttt{boundary[]\allowbreak{}.\allowbreak{}name} の使い方は、アダプタごとに次のように違う。
+
+\begingroup\small
+\begin{longtable}{>{\raggedright\arraybackslash}p{\dimexpr 0.3726\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.1926\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.4298\linewidth-2\tabcolsep\relax}}
+\toprule
+\textbf{アダプタ} & \textbf{探す文字列} & \textbf{書き換える場所} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{アダプタ} & \textbf{探す文字列} & \textbf{書き換える場所} \\
+\midrule
+\endhead
+\bottomrule
+\endlastfoot
+\texttt{tacode}（\texttt{code\_\allowbreak{}system: python3}）・\texttt{example\_\allowbreak{}externalcode}・\texttt{user} & \texttt{name} の最後の \texttt{.\allowbreak{}} より後ろ & 見つけた行の次の N 行の 2 語目（YAML のリストの要素） \\
+\texttt{tacode}（\texttt{code\_\allowbreak{}system: fortran}）・\texttt{heatcond} & \texttt{name} 全体 & 見つけた行の、先頭から N 個の語（カンマ区切りで書く） \\
+\texttt{cage} & \texttt{name} の最後の \texttt{.\allowbreak{}} より\textbf{前} & 見つけた行の次の N 行の 2 語目 \\
+\texttt{shapeoptimizer} & 使わない & \texttt{boundary} の要素の数をマーカーの数とする \\
+\end{longtable}
+\endgroup
+
+\subsection{初期値と、範囲の外のペナルティ}
+
+\begingroup\small
+\begin{longtable}{>{\raggedright\arraybackslash}p{\dimexpr 0.2686\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.1293\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.1791\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.4179\linewidth-2\tabcolsep\relax}}
+\toprule
+\textbf{キー} & \textbf{既定} & \textbf{選べる値} & \textbf{説明・注意} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{キー} & \textbf{既定} & \textbf{選べる値} & \textbf{説明・注意} \\
+\midrule
+\endhead
+\bottomrule
+\endlastfoot
+\texttt{parameter\_\allowbreak{}optimized.\allowbreak{}boundary\_\allowbreak{}initial} & 無し（\texttt{boundary} を使う） & \texttt{bound\_\allowbreak{}min}・\texttt{bound\_\allowbreak{}max} & PSO の粒子の初期位置を取る範囲。\textbf{すべての次元に同じ 1 つの範囲を使う} \\
+\texttt{parameter\_\allowbreak{}optimized.\allowbreak{}velocity\_\allowbreak{}initial} & 無し（\texttt{[-1,\allowbreak{} 1]\allowbreak{}}） & \texttt{velocity\_\allowbreak{}min}・\texttt{velocity\_\allowbreak{}max} & PSO の初速を取る範囲。すべての次元に同じ範囲。書かないと、パラメータの尺度によらず \texttt{[-1,\allowbreak{} 1]\allowbreak{}} になる \\
+\texttt{parameter\_\allowbreak{}optimized.\allowbreak{}flag\_\allowbreak{}penalty} & 必須（外部コードのアダプタ） & \texttt{True}・\texttt{False} & パラメータが \texttt{bound\_\allowbreak{}min}〜\texttt{bound\_\allowbreak{}max} の外なら、誤差に \texttt{penalty\_\allowbreak{}value} を足す。\texttt{simple\_\allowbreak{}function}・\texttt{user} は読まない \\
+\texttt{parameter\_\allowbreak{}optimized.\allowbreak{}penalty\_\allowbreak{}value} & 必須\textbackslash{}*（\texttt{flag\_\allowbreak{}penalty} が真） & 数値（\texttt{shapeoptimizer} は目的ごとのリストも可） & 足す値。\textbf{違反の量によらない定数}（既知の問題 13） \\
+\texttt{parameter\_\allowbreak{}optimized.\allowbreak{}value\_\allowbreak{}nonfinite} & 1e30 & 数値 & 目的関数の値が NaN・無限大のとき、または外部コードが失敗したときに使う値（PSO・ABC）。警告が出る \\
+\texttt{parameter\_\allowbreak{}optimized.\allowbreak{}flag\_\allowbreak{}with\_\allowbreak{}timeerror} & \texttt{False} & \texttt{True}・\texttt{False} & \texttt{tacode} だけ。特定の高度を通る時刻の誤差も評価する形に切り替える。\textbf{真にすると \texttt{tacode.\allowbreak{}time\_\allowbreak{}start}・\texttt{time\_\allowbreak{}end}・\texttt{target\_\allowbreak{}time} の単位が日から秒に変わる} \\
+\texttt{parameter\_\allowbreak{}optimized.\allowbreak{}set\_\allowbreak{}altitude}・\texttt{set\_\allowbreak{}count\_\allowbreak{}pass}・\texttt{weight\_\allowbreak{}time} & 必須\textbackslash{}*（上が真） & 高度 [km] のリスト（先頭だけ使う）・整数・数値 & 何回目にその高度を通る時刻を見るか、時刻の誤差の重み。\textbf{\texttt{weight\_\allowbreak{}time} を掛けた時刻の誤差は、返す誤差に入っていない}（既知の問題 27） \\
+\end{longtable}
+\endgroup
+
+\section{PSO}
+
+\texttt{src/\allowbreak{}optimizer\_\allowbreak{}pso/\allowbreak{}optimizer\_\allowbreak{}pso.\allowbreak{}py}。アルゴリズムはレポートの「粒子群最適化」の節を見ること。
+
+\begingroup\small
+\begin{longtable}{>{\raggedright\arraybackslash}p{\dimexpr 0.2686\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.1293\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.1791\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.4179\linewidth-2\tabcolsep\relax}}
+\toprule
+\textbf{キー} & \textbf{既定} & \textbf{選べる値} & \textbf{説明・注意} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{キー} & \textbf{既定} & \textbf{選べる値} & \textbf{説明・注意} \\
+\midrule
+\endhead
+\bottomrule
+\endlastfoot
+\texttt{PSO.\allowbreak{}num\_\allowbreak{}particle} & 必須 & 整数 & 粒子の数。MPI では均等に分ける（\texttt{np.\allowbreak{}array\_\allowbreak{}split}）。プロセス数より少ないと止まる \\
+\texttt{PSO.\allowbreak{}num\_\allowbreak{}optiter} & 必須 & 整数 & 反復（ステップ）の最大の数 \\
+\texttt{PSO.\allowbreak{}inertia} & 必須 & 数値 & 慣性の重み \texttt{w} \\
+\texttt{PSO.\allowbreak{}cognitive\_\allowbreak{}coef} & 必須 & 数値 & 個人の最良へ向かう係数 \texttt{c1} \\
+\texttt{PSO.\allowbreak{}social\_\allowbreak{}coef} & 必須 & 数値 & リーダーへ向かう係数 \texttt{c2} \\
+\texttt{PSO.\allowbreak{}maximize} & 必須 & \texttt{True}・\texttt{False}、または目的ごとのリスト（要素の数は \texttt{num\_\allowbreak{}objectives}） & 最大化なら符号 −1 を目的関数に渡す。\textbf{符号を掛けるのはアダプタの側}で、対応しているのは \texttt{shapeoptimizer}・\texttt{simple\_\allowbreak{}function}。\textbf{ほかのアダプタで真にすると止まる}（誤差を返すので最大化に意味が無い。既知の問題 1） \\
+\texttt{PSO.\allowbreak{}windowsize\_\allowbreak{}residual} & 20 & 整数 & 収束判定で、何ステップ前の個人の最良と比べるか \\
+\texttt{PSO.\allowbreak{}tolerance\_\allowbreak{}residual} & 1e-5 & 数値 & 個人の最良の相対変化の平均がこれ以下で収束とする \\
+\texttt{PSO.\allowbreak{}windowsize\_\allowbreak{}archive} & 5 & 整数 & 多目的だけ。何ステップ前のアーカイブの重心と比べるか \\
+\texttt{PSO.\allowbreak{}tolerance\_\allowbreak{}archive} & 1.0 & 数値 & 多目的だけ。アーカイブの重心の移動がこれ以下なら停滞とする。多目的の収束は「残差」かつ「停滞」 \\
+\texttt{PSO.\allowbreak{}num\_\allowbreak{}parallel} & 1 & 整数 & 1 プロセスの中で同時に評価する粒子の数（スレッド）。2 以上は、アダプタが並列評価に対応しているときだけ（いまは \texttt{shapeoptimizer}・\texttt{simple\_\allowbreak{}function}。対応していなければ止まる） \\
+\texttt{PSO.\allowbreak{}result\_\allowbreak{}dir} & 必須 & 文字列 & 出力のディレクトリ。\textbf{起動時に消して作り直す} \\
+\texttt{PSO.\allowbreak{}filename\_\allowbreak{}output} & 必須 & 文字列 & 全粒子の位置・速度・誤差の履歴（Tecplot） \\
+\texttt{PSO.\allowbreak{}filename\_\allowbreak{}global} & 必須 & 文字列 & 各ステップのアーカイブ（単目的では、そのステップの最良）の履歴 \\
+\texttt{PSO.\allowbreak{}kind\_\allowbreak{}residual\_\allowbreak{}computation} & \texttt{relative\_\allowbreak{}change} & 文字列 & \textbf{表示するだけで効かない}（既知の問題 4） \\
+\texttt{PSO.\allowbreak{}tolerance} & --- & --- & \textbf{読まれない}。古い名前。\texttt{tolerance\_\allowbreak{}residual} を使う \\
+\texttt{PSO.\allowbreak{}times\_\allowbreak{}spte\_\allowbreak{}pso} & --- & --- & \textbf{読まれない} \\
+\end{longtable}
+\endgroup
+
+\section{ABC}
+
+\texttt{src/\allowbreak{}optimizer\_\allowbreak{}abc/\allowbreak{}optimizer\_\allowbreak{}abc.\allowbreak{}py}。単目的だけ。
+
+\begingroup\small
+\begin{longtable}{>{\raggedright\arraybackslash}p{\dimexpr 0.2686\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.1293\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.1791\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.4179\linewidth-2\tabcolsep\relax}}
+\toprule
+\textbf{キー} & \textbf{既定} & \textbf{選べる値} & \textbf{説明・注意} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{キー} & \textbf{既定} & \textbf{選べる値} & \textbf{説明・注意} \\
+\midrule
+\endhead
+\bottomrule
+\endlastfoot
+\texttt{ABC.\allowbreak{}num\_\allowbreak{}employ\_\allowbreak{}bees} & 必須 & 整数 & 雇用蜂の数（= 食料源の数）。MPI では \texttt{np.\allowbreak{}array\_\allowbreak{}split} で均等に分ける \\
+\texttt{ABC.\allowbreak{}num\_\allowbreak{}onlook\_\allowbreak{}bees} & 必須 & 整数 & 追従蜂の数。古い名前 \texttt{num\_\allowbreak{}onlook\_\allowbreak{}bee} も読む（警告が出る） \\
+\texttt{ABC.\allowbreak{}visit\_\allowbreak{}limit} & 必須 & 整数 & 食料源を捨てるまでの、改善しなかった回数の上限（これを超えたら偵察蜂が作り直す。最良の食料源も対象）。古い綴り \texttt{vist\_\allowbreak{}limit} も読む（警告が出る） \\
+\texttt{ABC.\allowbreak{}num\_\allowbreak{}optiter} & 必須 & 整数 & 反復の最大の数 \\
+\texttt{ABC.\allowbreak{}tolerance} & 必須 & 数値 & \texttt{windowsize\_\allowbreak{}residual} ステップ前の解からの相対変化の平均がこれ以下で打ち切る。改善の無いステップでは 0 になるので、早く止まりすぎるなら \texttt{windowsize\_\allowbreak{}residual} を大きくする（既知の問題 5） \\
+\texttt{ABC.\allowbreak{}windowsize\_\allowbreak{}residual} & 1 & 整数 & 収束判定で比べる相手（何ステップ前の解か）。最初のこのステップ数は判定しない \\
+\texttt{ABC.\allowbreak{}num\_\allowbreak{}parallel} & 1 & 整数 & 1 プロセスの中で同時に評価する候補の数（スレッド）。対応するアダプタだけ。2 以上では、雇用蜂の候補を段の始まりの食料源から作るので、逐次とは答えが変わる（並列の数にはよらない）。初期化・追従蜂・偵察蜂は逐次と同じ \\
+\texttt{ABC.\allowbreak{}maximize} & \texttt{False} & \texttt{True}・\texttt{False}（リストは不可） & PSO と同じく、符号を掛けるのはアダプタの側。対応しないアダプタでは止まる \\
+\texttt{ABC.\allowbreak{}result\_\allowbreak{}dir}・\texttt{filename\_\allowbreak{}output}・\texttt{filename\_\allowbreak{}global} & 必須 & 文字列 & PSO と同じ。\texttt{filename\_\allowbreak{}global} には、各ステップの時点での\textbf{それまでの最良}を書く（1.7.0 から。既知の問題 16） \\
+\end{longtable}
+\endgroup
+
+\section{GA}
+
+\texttt{src/\allowbreak{}optimizer\_\allowbreak{}ga/\allowbreak{}optimizer\_\allowbreak{}ga.\allowbreak{}py}。実数値の GA を NSGA-II の世代交代で回す（1.7.0 で実装）。単目的では最良の個体が必ず残るエリート保存の GA、2 目的以上では NSGA-II になる。
+1 世代に評価するのは子の \texttt{num\_\allowbreak{}population} 個で、評価の総数は \texttt{num\_\allowbreak{}population × (num\_\allowbreak{}generation + 1)}（初期集団を含む）。
+
+\begingroup\small
+\begin{longtable}{>{\raggedright\arraybackslash}p{\dimexpr 0.2686\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.1293\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.1791\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.4179\linewidth-2\tabcolsep\relax}}
+\toprule
+\textbf{キー} & \textbf{既定} & \textbf{選べる値} & \textbf{説明・注意} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{キー} & \textbf{既定} & \textbf{選べる値} & \textbf{説明・注意} \\
+\midrule
+\endhead
+\bottomrule
+\endlastfoot
+\texttt{GA.\allowbreak{}num\_\allowbreak{}population} & 必須 & 4 以上の整数 & 集団の大きさ \texttt{N}。MPI では子の評価を均等に分ける \\
+\texttt{GA.\allowbreak{}num\_\allowbreak{}generation} & 必須 & 整数 & 世代の最大の数 \\
+\texttt{GA.\allowbreak{}maximize} & \texttt{False} & \texttt{True}・\texttt{False}、または目的ごとのリスト & PSO と同じく、符号を掛けるのはアダプタの側。対応しないアダプタでは止まる \\
+\texttt{GA.\allowbreak{}tournament\_\allowbreak{}size} & 2 & 整数 & トーナメント選択で比べる個体の数 \\
+\texttt{GA.\allowbreak{}crossover\_\allowbreak{}rate} & 0.9 & 0〜1 & 親の組に SBX を行う確率（行わなければ親をそのまま写す） \\
+\texttt{GA.\allowbreak{}eta\_\allowbreak{}crossover} & 15 & 数値 & SBX の分布指数。大きいほど子は親の近くにできる \\
+\texttt{GA.\allowbreak{}mutation\_\allowbreak{}rate} & \texttt{1/\allowbreak{}次元} & 0〜1 & 成分ごとの多項式突然変異の確率 \\
+\texttt{GA.\allowbreak{}eta\_\allowbreak{}mutation} & 20 & 数値 & 多項式突然変異の分布指数。大きいほど小さくずらす。最適解の近くで精度を詰めたいときは大きくする \\
+\texttt{GA.\allowbreak{}windowsize\_\allowbreak{}residual} & 20 & 整数 & 収束判定で、何世代前の集団の平均と比べるか \\
+\texttt{GA.\allowbreak{}tolerance\_\allowbreak{}residual} & 1e-5 & 数値 & 集団の値の平均の相対変化がこれ以下で止める \\
+\texttt{GA.\allowbreak{}num\_\allowbreak{}parallel} & 1 & 整数 & 1 プロセスの中で同時に評価する子の数（スレッド）。PSO と同じく、対応するアダプタだけ \\
+\texttt{GA.\allowbreak{}result\_\allowbreak{}dir}・\texttt{filename\_\allowbreak{}output}・\texttt{filename\_\allowbreak{}global} & 必須 & 文字列 & 出力。\texttt{filename\_\allowbreak{}output} は各世代の集団（パラメータ・番号・値・非劣解の順位・残差。世代 0 は初期集団）、\texttt{filename\_\allowbreak{}global} は各世代の第 1 フロント（単目的では最良）。\texttt{result\_\allowbreak{}dir} は起動時に消して作り直す \\
+\texttt{GA.\allowbreak{}mutation\_\allowbreak{}limit}・\texttt{GA.\allowbreak{}tolerance} & --- & --- & \textbf{読まれない}（1.6 までの試作の GA のキー。警告が出る） \\
+\end{longtable}
+\endgroup
+
+\section{Bayesian\_optimization}
+
+ガウス過程による最適化を、bayesian-optimization（3.x、\texttt{https:/\allowbreak{}/\allowbreak{}github.\allowbreak{}com/\allowbreak{}bayesian-optimization/\allowbreak{}BayesianOptimization}）で行う（実装は \texttt{src/\allowbreak{}Bayesian\_\allowbreak{}optimization/\allowbreak{}} にある）。1.6 までは GPyOpt を使っていた。キーの名前は 1.6 と同じで、GPyOpt にしか無かった選択肢は無くなった。最初に \texttt{initial\_\allowbreak{}design\_\allowbreak{}numdata} 点を一様乱数で評価し、そのあと \texttt{num\_\allowbreak{}optiter} 回、獲得関数が最大になる点を評価する。乱数の種は \texttt{optimizer.\allowbreak{}seed}。単目的だけで、MPI での分担はしない。
+
+\begingroup\small
+\begin{longtable}{>{\raggedright\arraybackslash}p{\dimexpr 0.2686\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.1293\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.1791\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.4179\linewidth-2\tabcolsep\relax}}
+\toprule
+\textbf{キー} & \textbf{既定} & \textbf{選べる値} & \textbf{説明・注意} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{キー} & \textbf{既定} & \textbf{選べる値} & \textbf{説明・注意} \\
+\midrule
+\endhead
+\bottomrule
+\endlastfoot
+\texttt{Bayesian\_\allowbreak{}optimization.\allowbreak{}num\_\allowbreak{}optiter} & 必須 & 整数 & 初期の点のあとに、獲得関数で選んで評価する回数。評価の総数は \texttt{initial\_\allowbreak{}design\_\allowbreak{}numdata + num\_\allowbreak{}optiter} \\
+\texttt{Bayesian\_\allowbreak{}optimization.\allowbreak{}initial\_\allowbreak{}design\_\allowbreak{}numdata} & 5 & 整数 & 最初に一様乱数で評価する点の数 \\
+\texttt{Bayesian\_\allowbreak{}optimization.\allowbreak{}acquisition\_\allowbreak{}type} & \texttt{EI} & \texttt{EI}・\texttt{PI}（\texttt{MPI} も可）・\texttt{LCB}（\texttt{UCB} も可） & 獲得関数。期待改善量・改善確率・信頼上限（最小化では下限）。\texttt{*\_\allowbreak{}MCMC} は無くなった（指定すると止まる） \\
+\texttt{Bayesian\_\allowbreak{}optimization.\allowbreak{}acquisition\_\allowbreak{}xi} & 0.01 & 数値 & EI・PI の探索の度合い（大きいほど探索寄り） \\
+\texttt{Bayesian\_\allowbreak{}optimization.\allowbreak{}acquisition\_\allowbreak{}weight} & 2.0 & 数値 & LCB（UCB）の探索の重み kappa \\
+\texttt{Bayesian\_\allowbreak{}optimization.\allowbreak{}normalize\_\allowbreak{}Y} & \texttt{True} & \texttt{True}・\texttt{False} & ガウス過程で目的関数の値を標準化するか \\
+\texttt{Bayesian\_\allowbreak{}optimization.\allowbreak{}model\_\allowbreak{}type} & \texttt{GP} & \texttt{GP} & 代理モデル。ガウス過程だけ（ほかの語は止まる） \\
+\texttt{Bayesian\_\allowbreak{}optimization.\allowbreak{}maximize} & \texttt{False} & \texttt{True}・\texttt{False} & 最大化。符号はベイズ最適化の側で扱うので、\textbf{どのアダプタでも効く} \\
+\texttt{Bayesian\_\allowbreak{}optimization.\allowbreak{}result\_\allowbreak{}dir}・\texttt{filename\_\allowbreak{}output} & 必須 & 文字列 & 出力（評価した順のパラメータ・誤差・番号）。\texttt{result\_\allowbreak{}dir} は起動時に消して作り直す \\
+\texttt{Bayesian\_\allowbreak{}optimization.\allowbreak{}flag\_\allowbreak{}image\_\allowbreak{}convergence}・\texttt{filename\_\allowbreak{}image\_\allowbreak{}convergence} & \texttt{False}・\texttt{convergence.\allowbreak{}png} & \texttt{True}・\texttt{False}、文字列 & 収束の図（それまでの最良）を保存する \\
+\texttt{Bayesian\_\allowbreak{}optimization.\allowbreak{}acquisition\_\allowbreak{}optimizer\_\allowbreak{}type}・\texttt{verbosity}・\texttt{flag\_\allowbreak{}image\_\allowbreak{}acquisition}・\texttt{filename\_\allowbreak{}image\_\allowbreak{}acquisition} & --- & --- & \textbf{読まれない}（GPyOpt の選択肢。警告が出る） \\
+\texttt{Bayesian\_\allowbreak{}optimization.\allowbreak{}initial\_\allowbreak{}design\_\allowbreak{}type}・\texttt{model\_\allowbreak{}update\_\allowbreak{}interval} & --- & --- & \textbf{読まれない} \\
+\texttt{Bayesian\_\allowbreak{}optimization.\allowbreak{}boundary} & 必須\textbackslash{}*（\texttt{kind\_\allowbreak{}adapter: user}） & \texttt{parameter\_\allowbreak{}optimized.\allowbreak{}boundary} と同じ形 & \texttt{user} のアダプタだけがここを読む（古い名残） \\
+\end{longtable}
+\endgroup
+
+\section{reference}
+
+誤差を評価するときの基準のデータ。\texttt{simple\_\allowbreak{}function}・\texttt{shapeoptimizer} は読まない。
+
+\begingroup\small
+\begin{longtable}{>{\raggedright\arraybackslash}p{\dimexpr 0.2686\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.1293\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.1791\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.4179\linewidth-2\tabcolsep\relax}}
+\toprule
+\textbf{キー} & \textbf{既定} & \textbf{選べる値} & \textbf{説明・注意} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{キー} & \textbf{既定} & \textbf{選べる値} & \textbf{説明・注意} \\
+\midrule
+\endhead
+\bottomrule
+\endlastfoot
+\texttt{reference.\allowbreak{}directory\_\allowbreak{}path\_\allowbreak{}specify}・\texttt{manual\_\allowbreak{}path} & 必須 & \texttt{manual}（\texttt{default} は使えない） & 基準のデータの場所（上の「テンプレートの場所の指定」） \\
+\texttt{reference.\allowbreak{}filename\_\allowbreak{}input} & 必須 & 文字列 & 基準のデータのファイル。読み方はアダプタごとに違う。\texttt{tacode} は \texttt{<名前>\_\allowbreak{}<var\_\allowbreak{}y の各要素>.\allowbreak{}<拡張子>} の 3 つのファイル（列は時刻・平均・標準偏差、1 行目は見出し）。\texttt{example\_\allowbreak{}externalcode}・\texttt{user} は x, y（2 行飛ばす）。\texttt{heatcond} は Tecplot（1 行目が見出し）。\texttt{cage} はカンマ区切り（0 行目が見出し） \\
+\texttt{reference.\allowbreak{}var\_\allowbreak{}x} & 必須 & 文字列 & x（時刻）の列の名前。\textbf{\texttt{tacode} は読むだけで使わない} \\
+\texttt{reference.\allowbreak{}var\_\allowbreak{}y} & 必須 & \texttt{tacode} はリスト、\texttt{heatcond} は文字列、\texttt{cage} はリスト & \texttt{tacode} はファイルの名前の後ろ（順序が意味を持つ。\texttt{[0]\allowbreak{}} 経度、\texttt{[1]\allowbreak{}} 緯度、\texttt{[2]\allowbreak{}} 高度）。\texttt{heatcond} は計算の \texttt{T[K]\allowbreak{}} と比べる列。\texttt{cage} は \texttt{cage.\allowbreak{}var\_\allowbreak{}y} と順に比べる列 \\
+\texttt{reference.\allowbreak{}timeunit} & 必須（\texttt{tacode}） & \texttt{day}・\texttt{hour}・\texttt{min}・\texttt{sec} & 基準のデータの時刻の列（秒）をこれで割って比べる。\textbf{\texttt{day} は恒星日（86164.0989 秒）}。基準のデータを暦日で作ると、黙って誤る（既知の問題 23）。\texttt{hour} の係数は 1.7.0 で 3600 に直した（既知の問題 3） \\
+\end{longtable}
+\endgroup
+
+\section{tacode}
+
+\texttt{src/\allowbreak{}adapter\_\allowbreak{}tacode/\allowbreak{}adapter\_\allowbreak{}tacode.\allowbreak{}py}。軌道解析コード Tacode を呼ぶ。
+
+\begingroup\small
+\begin{longtable}{>{\raggedright\arraybackslash}p{\dimexpr 0.2686\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.1293\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.1791\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.4179\linewidth-2\tabcolsep\relax}}
+\toprule
+\textbf{キー} & \textbf{既定} & \textbf{選べる値} & \textbf{説明・注意} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{キー} & \textbf{既定} & \textbf{選べる値} & \textbf{説明・注意} \\
+\midrule
+\endhead
+\bottomrule
+\endlastfoot
+\texttt{tacode.\allowbreak{}code\_\allowbreak{}system} & 必須 & \texttt{python3}・\texttt{fortran} & Tacode の版。変数の名前・見出しの読み方・制御ファイルの書き換え方が変わる \\
+\texttt{tacode.\allowbreak{}work\_\allowbreak{}dir}・\texttt{case\_\allowbreak{}dir}・\texttt{step\_\allowbreak{}digit} & 必須 & 文字列・文字列・整数 & 作業ディレクトリ（\textbf{起動時に消して作り直す}）。反復ごとのケースは \texttt{<work\_\allowbreak{}dir>/\allowbreak{}<case\_\allowbreak{}dir><番号>}（番号は \texttt{step\_\allowbreak{}digit} 桁の 0 埋め） \\
+\texttt{tacode.\allowbreak{}directory\_\allowbreak{}path\_\allowbreak{}specify}・\texttt{manual\_\allowbreak{}path} & 必須 & \texttt{manual} & テンプレートのケースの場所 \\
+\texttt{tacode.\allowbreak{}filename\_\allowbreak{}control} & 必須 & 文字列 & パラメータを書き込む制御ファイル（例 \texttt{orbit.\allowbreak{}ctl}） \\
+\texttt{tacode.\allowbreak{}filename\_\allowbreak{}result} & 必須 & 文字列 & Tacode の軌道の出力（例 \texttt{trajectory.\allowbreak{}dat}） \\
+\texttt{tacode.\allowbreak{}cmd\_\allowbreak{}code} & 必須 & 実行ファイル & ケースのディレクトリの中で起動する \\
+\texttt{tacode.\allowbreak{}target\_\allowbreak{}time} & 必須 & 数値（日。\texttt{flag\_\allowbreak{}with\_\allowbreak{}timeerror} なら秒） & Tacode の時刻に足す開始の時刻。基準のデータの中の開始点を探すのにも使う \\
+\texttt{tacode.\allowbreak{}time\_\allowbreak{}start}・\texttt{time\_\allowbreak{}end} & 必須 & 数値（同上） & 誤差を評価する区間 \\
+\texttt{tacode.\allowbreak{}result\_\allowbreak{}dir} & 必須 & 文字列 & ケースごとの出力の置き場 \\
+\texttt{tacode.\allowbreak{}flag\_\allowbreak{}output}・\texttt{filename\_\allowbreak{}output} & 必須（名前は必須\textbackslash{}*） & \texttt{True}・\texttt{False}、文字列 & ケースごとの軌道を書き出す。名前には \texttt{\_\allowbreak{}caseNNNN} が入る \\
+\texttt{tacode.\allowbreak{}convert\_\allowbreak{}timeunit\_\allowbreak{}tapost} & --- & --- & \textbf{読まれない} \\
+\end{longtable}
+\endgroup
+
+基準のデータの時刻の範囲の外にある点は比べず、その数を警告する（1.7.0 から。以前は配列の末尾へ回り込んでいた。既知の問題 6）。警告が出たら、\texttt{target\_\allowbreak{}time}・\texttt{time\_\allowbreak{}start}・\texttt{time\_\allowbreak{}end} と基準のデータの時刻を見直すこと。
+
+\section{simple\_function}
+
+\texttt{src/\allowbreak{}adapter\_\allowbreak{}template/\allowbreak{}adapter\_\allowbreak{}simple\_\allowbreak{}function.\allowbreak{}py}。外部コードの要らない、解析的な目的関数。
+目的関数は \texttt{f\_\allowbreak{}k(x) = Σ\_\allowbreak{}i (x\_\allowbreak{}i − 2(k−1))\textasciicircum{}2}（\texttt{k = 1,\allowbreak{} …,\allowbreak{} num\_\allowbreak{}objectives}）で、ずらした球関数である。
+最大化の符号に対応し、スレッドからの同時の評価（\texttt{PSO.\allowbreak{}num\_\allowbreak{}parallel}）にも対応している（テストと検証に使う）。
+
+\begingroup\small
+\begin{longtable}{>{\raggedright\arraybackslash}p{\dimexpr 0.2686\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.1293\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.1791\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.4179\linewidth-2\tabcolsep\relax}}
+\toprule
+\textbf{キー} & \textbf{既定} & \textbf{選べる値} & \textbf{説明・注意} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{キー} & \textbf{既定} & \textbf{選べる値} & \textbf{説明・注意} \\
+\midrule
+\endhead
+\bottomrule
+\endlastfoot
+\texttt{simple\_\allowbreak{}function.\allowbreak{}flag\_\allowbreak{}output} & 必須 & \texttt{True}・\texttt{False} & 関数の形を 1 次元で書き出す。\textbf{真のときは \texttt{num\_\allowbreak{}objectives} が 2 以上でないと止まる}（2 列目を書くため） \\
+\texttt{simple\_\allowbreak{}function.\allowbreak{}result\_\allowbreak{}dir}・\texttt{filename\_\allowbreak{}output}・\texttt{function\_\allowbreak{}discrete}・\texttt{function\_\allowbreak{}bound\_\allowbreak{}min}・\texttt{function\_\allowbreak{}bound\_\allowbreak{}max} & 必須\textbackslash{}*（上が真） & 文字列・文字列・整数・数値・数値 & 書き出しの場所と、標本点の数・範囲 \\
+\end{longtable}
+\endgroup
+
+\section{example\_externalcode}
+
+\texttt{src/\allowbreak{}adapter\_\allowbreak{}template/\allowbreak{}adapter\_\allowbreak{}example\_\allowbreak{}externalcode.\allowbreak{}py}。外部コードを呼ぶアダプタの雛形。
+
+\begingroup\small
+\begin{longtable}{>{\raggedright\arraybackslash}p{\dimexpr 0.2686\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.1293\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.1791\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.4179\linewidth-2\tabcolsep\relax}}
+\toprule
+\textbf{キー} & \textbf{既定} & \textbf{選べる値} & \textbf{説明・注意} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{キー} & \textbf{既定} & \textbf{選べる値} & \textbf{説明・注意} \\
+\midrule
+\endhead
+\bottomrule
+\endlastfoot
+\texttt{example\_\allowbreak{}externalcode.\allowbreak{}work\_\allowbreak{}dir}・\texttt{case\_\allowbreak{}dir}・\texttt{step\_\allowbreak{}digit} & 必須 &  & \texttt{tacode} と同じ \\
+\texttt{example\_\allowbreak{}externalcode.\allowbreak{}directory\_\allowbreak{}path\_\allowbreak{}specify}・\texttt{manual\_\allowbreak{}path} & 必須 & \texttt{manual} & テンプレートの場所 \\
+\texttt{example\_\allowbreak{}externalcode.\allowbreak{}filename\_\allowbreak{}control}・\texttt{filename\_\allowbreak{}result} & 必須 & 文字列 & 制御ファイル（YAML のリストの形で書き換える）と、結果（列 \texttt{x}・\texttt{y}） \\
+\texttt{example\_\allowbreak{}externalcode.\allowbreak{}cmd\_\allowbreak{}externalcode} & 必須 & 実行ファイル & \textbf{他のアダプタの \texttt{cmd\_\allowbreak{}code} と名前が違う} \\
+\texttt{example\_\allowbreak{}externalcode.\allowbreak{}x\_\allowbreak{}min}・\texttt{x\_\allowbreak{}max}・\texttt{x\_\allowbreak{}offset} & 必須 & 数値 & 誤差を評価する x の区間と、計算の x に足すずれ \\
+\texttt{example\_\allowbreak{}externalcode.\allowbreak{}result\_\allowbreak{}dir}・\texttt{flag\_\allowbreak{}output}・\texttt{filename\_\allowbreak{}output} & 必須（名前は必須\textbackslash{}*） &  & ケースごとの出力 \\
+\end{longtable}
+\endgroup
+
+\section{heatcond}
+
+\texttt{src/\allowbreak{}adapter\_\allowbreak{}heatcond/\allowbreak{}adapter\_\allowbreak{}heatcond.\allowbreak{}py}。熱伝導の解析コードを呼ぶ。
+
+\begingroup\small
+\begin{longtable}{>{\raggedright\arraybackslash}p{\dimexpr 0.2686\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.1293\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.1791\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.4179\linewidth-2\tabcolsep\relax}}
+\toprule
+\textbf{キー} & \textbf{既定} & \textbf{選べる値} & \textbf{説明・注意} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{キー} & \textbf{既定} & \textbf{選べる値} & \textbf{説明・注意} \\
+\midrule
+\endhead
+\bottomrule
+\endlastfoot
+\texttt{heatcond.\allowbreak{}work\_\allowbreak{}dir}・\texttt{case\_\allowbreak{}dir}・\texttt{step\_\allowbreak{}digit}・\texttt{directory\_\allowbreak{}path\_\allowbreak{}specify}・\texttt{manual\_\allowbreak{}path}・\texttt{cmd\_\allowbreak{}code} & 必須 &  & \texttt{tacode} と同じ \\
+\texttt{heatcond.\allowbreak{}filename\_\allowbreak{}control}・\texttt{filename\_\allowbreak{}result} & 必須 & 文字列 & 制御ファイル（\texttt{name} を含む行の先頭から N 語を書き換える）と、履歴のファイル（Tecplot） \\
+\texttt{heatcond.\allowbreak{}x\_\allowbreak{}min}・\texttt{x\_\allowbreak{}max}・\texttt{x\_\allowbreak{}offset} & 必須 & 数値 [s] & 誤差を評価する時刻の区間と、\texttt{Time[s]\allowbreak{}} に足すずれ \\
+\texttt{heatcond.\allowbreak{}result\_\allowbreak{}dir}・\texttt{flag\_\allowbreak{}output}・\texttt{filename\_\allowbreak{}output} & 必須（名前は必須\textbackslash{}*） &  & ケースごとの出力 \\
+\texttt{heatcond.\allowbreak{}variables\_\allowbreak{}output} & 必須\textbackslash{}*（\texttt{flag\_\allowbreak{}output}） & \texttt{Time[s]\allowbreak{}}・\texttt{T[K]\allowbreak{}}・\texttt{Alt.\allowbreak{}[km]\allowbreak{}}・\texttt{Dens[kg/\allowbreak{}m3]\allowbreak{}}・\texttt{Tback[K]\allowbreak{}}・\texttt{Tatm[K]\allowbreak{}}・\texttt{Htcoef}・\texttt{Re}・\texttt{Solar[W/\allowbreak{}m2]\allowbreak{}}・\texttt{Heatflux[W/\allowbreak{}m2]\allowbreak{}} の一部 & 書き出す列 \\
+\end{longtable}
+\endgroup
+
+\section{cage}
+
+\texttt{src/\allowbreak{}adapter\_\allowbreak{}cage/\allowbreak{}adapter\_\allowbreak{}cage.\allowbreak{}py}。
+
+\begingroup\small
+\begin{longtable}{>{\raggedright\arraybackslash}p{\dimexpr 0.2686\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.1293\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.1791\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.4179\linewidth-2\tabcolsep\relax}}
+\toprule
+\textbf{キー} & \textbf{既定} & \textbf{選べる値} & \textbf{説明・注意} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{キー} & \textbf{既定} & \textbf{選べる値} & \textbf{説明・注意} \\
+\midrule
+\endhead
+\bottomrule
+\endlastfoot
+\texttt{cage.\allowbreak{}work\_\allowbreak{}dir}・\texttt{case\_\allowbreak{}dir}・\texttt{step\_\allowbreak{}digit}・\texttt{directory\_\allowbreak{}path\_\allowbreak{}specify}・\texttt{manual\_\allowbreak{}path}・\texttt{cmd\_\allowbreak{}code} & 必須 &  & \texttt{tacode} と同じ \\
+\texttt{cage.\allowbreak{}filename\_\allowbreak{}control}・\texttt{filename\_\allowbreak{}result} & 必須 & 文字列 & 制御ファイル（YAML のリスト）と、カンマ区切りの結果 \\
+\texttt{cage.\allowbreak{}var\_\allowbreak{}x}・\texttt{var\_\allowbreak{}y} & 必須 & 文字列・リスト & 結果のファイルの x の列と、\texttt{reference.\allowbreak{}var\_\allowbreak{}y} と順に比べる y の列 \\
+\texttt{cage.\allowbreak{}x\_\allowbreak{}min}・\texttt{x\_\allowbreak{}max}・\texttt{x\_\allowbreak{}offset} & 必須 & 数値 & \textbf{読むが効かない}（区間を切る処理がコメントアウトされている） \\
+\texttt{cage.\allowbreak{}result\_\allowbreak{}dir}・\texttt{flag\_\allowbreak{}output}・\texttt{variables\_\allowbreak{}output}・\texttt{filename\_\allowbreak{}output} & 必須（後ろの 2 つは必須\textbackslash{}*） &  & ケースごとの出力 \\
+\end{longtable}
+\endgroup
+
+\section{shapeoptimizer}
+
+\texttt{src/\allowbreak{}adapter\_\allowbreak{}shapeoptimizer/\allowbreak{}adapter\_\allowbreak{}shapeoptimizer.\allowbreak{}py}。SU2 と、preCICE で連成した形状の変形（\texttt{src\_\allowbreak{}interface/\allowbreak{}}）を呼ぶ。
+目的関数の値は、\texttt{num\_\allowbreak{}objectives: 1} なら抗力、\texttt{2} なら抗力とモーメントである（1.7.0 から。既知の問題 15）。
+
+\begingroup\small
+\begin{longtable}{>{\raggedright\arraybackslash}p{\dimexpr 0.2686\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.1293\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.1791\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.4179\linewidth-2\tabcolsep\relax}}
+\toprule
+\textbf{キー} & \textbf{既定} & \textbf{選べる値} & \textbf{説明・注意} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{キー} & \textbf{既定} & \textbf{選べる値} & \textbf{説明・注意} \\
+\midrule
+\endhead
+\bottomrule
+\endlastfoot
+\texttt{shapeoptimizer.\allowbreak{}work\_\allowbreak{}dir}・\texttt{case\_\allowbreak{}dir}・\texttt{step\_\allowbreak{}digit} & 必須 &  & 作業ディレクトリ。ケースは \texttt{<case\_\allowbreak{}dir>\_\allowbreak{}rank<番号>} \\
+\texttt{shapeoptimizer.\allowbreak{}directory\_\allowbreak{}path\_\allowbreak{}specify}・\texttt{manual\_\allowbreak{}path} & 必須 & \texttt{manual} & テンプレートの場所 \\
+\texttt{shapeoptimizer.\allowbreak{}cmd\_\allowbreak{}code} & 必須 & 実行ファイル & ケースのディレクトリの中で起動する（例 \texttt{.\allowbreak{}/\allowbreak{}run\_\allowbreak{}SU2-OPT\_\allowbreak{}pps.\allowbreak{}sh}）。環境変数 \texttt{BOREALIS\_\allowbreak{}SLOT}・\texttt{BOREALIS\_\allowbreak{}NUM\_\allowbreak{}CPU}・\texttt{BOREALIS\_\allowbreak{}CPU\_\allowbreak{}SET} を渡す。\textbf{計算が終わるまで戻らないこと}（末尾を \texttt{wait \&} にしない） \\
+\texttt{shapeoptimizer.\allowbreak{}result\_\allowbreak{}dir} & 必須 & 文字列 & 作るだけで、何も書かない \\
+\texttt{shapeoptimizer.\allowbreak{}in\_\allowbreak{}sequential} & 必須 & \texttt{True}・\texttt{False} & 真なら粒子ごとに連成計算を常駐させ、ステップごとにファイルの名前を変えてやりとりする。PSO でだけ使える \\
+\texttt{shapeoptimizer.\allowbreak{}work\_\allowbreak{}dir\_\allowbreak{}series} & 必須 & 文字列 & 変位と力のファイルを置く、ケースの中のディレクトリ（例 \texttt{optimization}） \\
+\texttt{shapeoptimizer.\allowbreak{}filename\_\allowbreak{}displacements}・\texttt{filename\_\allowbreak{}forces} & 必須 & 文字列 & Borealis が書く変位（マーカー × 次元）と、読む力（1 行目が力、2 行目がモーメント）。目的関数は \texttt{[力[0]\allowbreak{},\allowbreak{} モーメント[0]\allowbreak{}]\allowbreak{}} \\
+\texttt{shapeoptimizer.\allowbreak{}step\_\allowbreak{}digit\_\allowbreak{}series} & 必須 & 整数 & 逐次モードの \texttt{\_\allowbreak{}stepNNNNN} の桁 \\
+\texttt{shapeoptimizer.\allowbreak{}flag\_\allowbreak{}surfacearea\_\allowbreak{}constraint} & \texttt{False} & \texttt{True}・\texttt{False} & 表面積の制約 \\
+\texttt{shapeoptimizer.\allowbreak{}work\_\allowbreak{}dir\_\allowbreak{}surfacearea}・\texttt{filename\_\allowbreak{}surfacearea} & \texttt{fluid}・\texttt{surfacearea\_\allowbreak{}su2.\allowbreak{}dat} & 文字列 & 表面積のファイル（見出しと \texttt{area,\allowbreak{} area\_\allowbreak{}init}） \\
+\texttt{shapeoptimizer.\allowbreak{}tolerance\_\allowbreak{}surfacearea} & 0.05 & 数値 & 表面積の相対変化がこれ以上ならペナルティ \\
+\texttt{shapeoptimizer.\allowbreak{}penalty\_\allowbreak{}surfacearea} & 必須\textbackslash{}*（制約を破ったとき） & 数値 & そのペナルティ \\
+\texttt{shapeoptimizer.\allowbreak{}num\_\allowbreak{}cpu\_\allowbreak{}per\_\allowbreak{}case} & 2 & 整数 & ケースあたりのコア数 \\
+\texttt{shapeoptimizer.\allowbreak{}cpu\_\allowbreak{}offset} & 0 & 整数 & 最初のコア。スロット \texttt{s} のコアは \texttt{cpu\_\allowbreak{}offset + s × num\_\allowbreak{}cpu\_\allowbreak{}per\_\allowbreak{}case} 番目から \\
+\texttt{shapeoptimizer.\allowbreak{}cpu\_\allowbreak{}assignment} & \texttt{affinity} & \texttt{affinity}・\texttt{absolute} & \texttt{affinity} はこのプロセスに許されたコアの並び（\texttt{os.\allowbreak{}sched\_\allowbreak{}getaffinity}。ジョブスケジューラが割り当てたコア）から数える。\texttt{absolute} は 0 番からの絶対番号。足りなければ起動時に止まる \\
+\texttt{shapeoptimizer.\allowbreak{}flag\_\allowbreak{}cpu\_\allowbreak{}set} & \texttt{True} & \texttt{True}・\texttt{False} & 偽なら \texttt{BOREALIS\_\allowbreak{}CPU\_\allowbreak{}SET} を渡さない \\
+\texttt{shapeoptimizer.\allowbreak{}polling\_\allowbreak{}interval} & 3.0 & 数値 [s] & 結果のファイルを見る間隔。1 件が短いケースでは縮める \\
+\texttt{shapeoptimizer.\allowbreak{}timeout\_\allowbreak{}finalize} & 600.0 & 数値 [s] & 結果のあと、\texttt{cmd\_\allowbreak{}code} の終了を待つ上限。超えたらプロセスグループを止める \\
+\texttt{shapeoptimizer.\allowbreak{}penalty\_\allowbreak{}failure} & 1e10 & 数値 & 結果のファイルが得られなかったときに返す値（2 つの目的とも） \\
+\texttt{shapeoptimizer.\allowbreak{}power\_\allowbreak{}variable\_\allowbreak{}objectivefunction}・\texttt{filename\_\allowbreak{}result}・\texttt{flag\_\allowbreak{}output}・\texttt{filename\_\allowbreak{}output}、\texttt{boundary[]\allowbreak{}.\allowbreak{}coordinate} & --- & --- & \textbf{読まれない} \\
+\end{longtable}
+\endgroup
+
+同時に評価する数は \texttt{<kind\_\allowbreak{}optimizer>.\allowbreak{}num\_\allowbreak{}parallel}（\texttt{PSO}・\texttt{GA}・\texttt{ABC} のどれでも）で決める。Borealis は \texttt{mpirun} なしで起動する。
+
+\section{user}
+
+\texttt{src/\allowbreak{}hidden\_\allowbreak{}adapter\_\allowbreak{}user/\allowbreak{}adapter\_\allowbreak{}user.\allowbreak{}py}（\texttt{kind\_\allowbreak{}adapter: user}）。利用者が自分のアダプタを置く場所。
+キーは \texttt{example\_\allowbreak{}externalcode} とほぼ同じで、\texttt{user.\allowbreak{}work\_\allowbreak{}dir}・\texttt{case\_\allowbreak{}dir}・\texttt{step\_\allowbreak{}digit}・\texttt{directory\_\allowbreak{}path\_\allowbreak{}specify}・\texttt{manual\_\allowbreak{}path}・\texttt{filename\_\allowbreak{}control}・\texttt{filename\_\allowbreak{}result}・\texttt{cmd\_\allowbreak{}code}・\texttt{result\_\allowbreak{}dir}・\texttt{x\_\allowbreak{}min}・\texttt{x\_\allowbreak{}max}・\texttt{flag\_\allowbreak{}output}・\texttt{filename\_\allowbreak{}output} を読む（\texttt{x\_\allowbreak{}offset} とペナルティは無い）。
+\textbf{パラメータの範囲は \texttt{Bayesian\_\allowbreak{}optimization.\allowbreak{}boundary} から読む。}
+
+\section{読まれないキーの一覧}
+
+雛形と testcase の yml に書いてあるが、コードが読まないキー（2026-10-19 に、すべての \texttt{borealis.\allowbreak{}yml} を調べた）。書いても効かない。1.7.0 からは、起動時に警告が出る。
+
+\begingroup\small
+\begin{longtable}{>{\raggedright\arraybackslash}p{\dimexpr 0.4017\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.3732\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.2201\linewidth-2\tabcolsep\relax}}
+\toprule
+\textbf{キー} & \textbf{書いてある所} & \textbf{代わりに} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{キー} & \textbf{書いてある所} & \textbf{代わりに} \\
+\midrule
+\endhead
+\bottomrule
+\endlastfoot
+\texttt{PSO.\allowbreak{}tolerance} & \texttt{src/\allowbreak{}borealis.\allowbreak{}yml}、\texttt{testcase/\allowbreak{}work\_\allowbreak{}cage}・\texttt{work\_\allowbreak{}example\_\allowbreak{}externalcode}・\texttt{work\_\allowbreak{}heatcond} & \texttt{PSO.\allowbreak{}tolerance\_\allowbreak{}residual} \\
+\texttt{PSO.\allowbreak{}times\_\allowbreak{}spte\_\allowbreak{}pso} & \texttt{testcase/\allowbreak{}work\_\allowbreak{}shapeoptimizer} & 無し \\
+\texttt{PSO.\allowbreak{}kind\_\allowbreak{}residual\_\allowbreak{}computation} & \texttt{testcase/\allowbreak{}work\_\allowbreak{}shapeoptimizer}（\texttt{relative\_\allowbreak{}value}） & 表示されるだけ \\
+\texttt{GA.\allowbreak{}mutation\_\allowbreak{}limit}・\texttt{GA.\allowbreak{}tolerance} & \texttt{testcase/\allowbreak{}work\_\allowbreak{}heatcond}・\texttt{work\_\allowbreak{}simple\_\allowbreak{}function} & 1.6 までの試作の GA のキー \\
+\texttt{Bayesian\_\allowbreak{}optimization.\allowbreak{}initial\_\allowbreak{}design\_\allowbreak{}type}・\texttt{model\_\allowbreak{}update\_\allowbreak{}interval}・\texttt{acquisition\_\allowbreak{}optimizer\_\allowbreak{}type}・\texttt{verbosity}・\texttt{flag\_\allowbreak{}image\_\allowbreak{}acquisition} & ベイズ最適化のセクションのある yml すべて & 無し（GPyOpt の選択肢） \\
+\texttt{tacode.\allowbreak{}convert\_\allowbreak{}timeunit\_\allowbreak{}tapost} & \texttt{src/\allowbreak{}borealis.\allowbreak{}yml}、tacode のケースすべて & 無し \\
+\texttt{shapeoptimizer.\allowbreak{}power\_\allowbreak{}variable\_\allowbreak{}objectivefunction} ほか & \texttt{testcase/\allowbreak{}work\_\allowbreak{}shapeoptimizer} & 無し（既知の問題 15） \\
+\texttt{reference.\allowbreak{}timeunit}（heatcond のケース） & \texttt{testcase/\allowbreak{}work\_\allowbreak{}heatcond} & \texttt{tacode} だけが読む \\
+\texttt{parameter\_\allowbreak{}optimized.\allowbreak{}flag\_\allowbreak{}penalty}・\texttt{penalty\_\allowbreak{}value}（simple\_function のケース） & \texttt{testcase/\allowbreak{}work\_\allowbreak{}simple\_\allowbreak{}function} & \texttt{simple\_\allowbreak{}function} はペナルティを使わない \\
+\end{longtable}
+\endgroup
+
+逆に、必須なのに yml に無いもの（そのケースを走らせると \texttt{KeyError} で止まるはずのもの。実行はしていない）。
+
+\begingroup\small
+\begin{longtable}{>{\raggedright\arraybackslash}p{\dimexpr 0.6089\linewidth-2\tabcolsep\relax}>{\raggedright\arraybackslash}p{\dimexpr 0.3861\linewidth-2\tabcolsep\relax}}
+\toprule
+\textbf{yml} & \textbf{足りないキー} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{yml} & \textbf{足りないキー} \\
+\midrule
+\endhead
+\bottomrule
+\endlastfoot
+\texttt{src/\allowbreak{}borealis.\allowbreak{}yml} の \texttt{cage} のセクション & \texttt{cage.\allowbreak{}var\_\allowbreak{}x}・\texttt{cage.\allowbreak{}var\_\allowbreak{}y} \\
+\end{longtable}
+\endgroup
+

@@ -1,11 +1,11 @@
 # Configuration file for Borealis code
 
-adapter: 
+adapter:
   # tacode, simple_function, or example_externalcode
   kind_adapter: tacode
-  
 
-optimizer: 
+
+optimizer:
   # Bayesian_optimization or PSO
   #kind_optimizer: Bayesian_optimization
   kind_optimizer: PSO
@@ -13,12 +13,12 @@ optimizer:
 
 objectives:
    num_objectives: 1
-   
+
 
 parameter_optimized:
   # Parameter boundaries
   boundary:
-    - name: '# Initial coordinate' 
+    - name: '# Initial coordinate'
       component:
         - type: coord_longitude # Degree
           bound_min: -126.76427528637089
@@ -29,7 +29,7 @@ parameter_optimized:
         - type: coord_altitude # meter in Tacode-Fotran
           bound_min: 211092.5432920908
           bound_max: 211092.5432920908
-    - name: '# Initial velocity' 
+    - name: '# Initial velocity'
       component:
         - type: longitude
           bound_min: 6775
@@ -57,9 +57,9 @@ parameter_optimized:
   # Penalty
   flag_penalty: False
   penalty_value: 1000.0
-  
+
   flag_with_timeerror: False
-  set_altitude: 
+  set_altitude:
    - 490 #km
   set_count_pass: 1 # 設定高度を何回通り過ぎた点同士で時間差計算を行うか
   weight_time:  0.001 # Added by Tomoki Sakai 2023/3/7 誤差計算の時間項にかける定数　dafault : 1
@@ -73,11 +73,11 @@ Bayesian_optimization:
   acquisition_type: EI # EI, EI_MCMC, MPI, MPI_MCMC, LCB, LCB_MCMC
   acquisition_weight: 2
   acquisition_optimizer_type: lbfgs # lbfgs, DIRECT, CMA
-  initial_design_numdata: 5 # 設定する初期データの数、X, Yを指定した場合は設定不要。 
+  initial_design_numdata: 5 # 設定する初期データの数、X, Yを指定した場合は設定不要。
   initial_design_type: random # random, latin
   model_update_interval: 1
   verbosity: True
-  
+
   num_optiter: 100
 
   # Results data file (Tecplot data format)
@@ -117,7 +117,7 @@ PSO: # Particle swarm optimization
   # Results data file (Tecplot data format)
   result_dir: result_PSO
   filename_output: output_PSO.dat
-  filename_global: output_global.dat  
+  filename_global: output_global.dat
 
 
 ABC: # Artificial bee colony
@@ -170,13 +170,13 @@ tacode:
 
   # Executing script
   cmd_code: ./run_tacode.sh
-  
+
   # Control file
   filename_control: orbit.ctl
-  
+
   # Result file name computed by Tacode
   filename_result: trajectory.dat
-  
+
   # Tiem variables (Tacodeではsecondで出力されるのでその変換を行う)
   convert_timeunit_tapost: sec2day
 
@@ -189,7 +189,7 @@ tacode:
   time_end:   118.3931
   target_time: 118.3480
 
-  # Result trajectory of Tacode 
+  # Result trajectory of Tacode
   result_dir: result_tacode
   flag_output: False
   filename_output: output_result.dat

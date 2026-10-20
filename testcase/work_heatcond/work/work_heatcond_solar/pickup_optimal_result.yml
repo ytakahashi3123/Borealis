@@ -1,0 +1,16 @@
+# Configuration file for copying optimal solution
+
+# Extracting reading files
+flag_filereading_extracted: True
+filename_extract_list: result_PSO/output_global.dat
+
+# Input file
+work_dir: work_heatcond
+case_dir: case
+filename_result: history.dat
+step_digit: 5
+step_start: 1
+step_end: 700
+
+# Output file
+copy_dir: result_PSO

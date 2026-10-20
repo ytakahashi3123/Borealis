@@ -1,5 +1,0 @@
-Altitude	Density_factor
-0	2
-150	2
-200	1
-400	1

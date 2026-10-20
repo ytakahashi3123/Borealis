@@ -3,7 +3,8 @@ Requirements to run Borealies
 - python (version >= 3.8.10)
 - numpy version (>=1.22.3)
 - yaml (version >= 5.3.1)
-- GPyOpt (version >= 1.2.6)
+- mpi4py (version >= 3.0.3)
+- bayesian-optimization (version >= 3.0; only for Bayesian optimization. It replaces GPyOpt from Borealis 1.7.0)
 
 (versions used in the developer's environment)
 

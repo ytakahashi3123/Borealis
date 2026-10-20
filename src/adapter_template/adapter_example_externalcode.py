@@ -160,12 +160,8 @@ class adapter_example_externalcode(orbital):
     
     print('--Run external code')
 
-    # Move to computing directory, run Tacode, and return to the original directory
-    os.chdir( self.work_dir_case )
-    subprocess.call( self.cmd_code )
-    os.chdir( self.root_dir )
-
-    return
+    # 終了ステータスと結果ファイルを確かめる（既知の問題 7）。子には MPI の環境変数を渡さない（既知の問題 19）
+    return super().run_external_code( self.cmd_code, self.work_dir_case, self.filename_result_code )
 
 
   @orbital.time_measurement_decorated
@@ -195,16 +191,21 @@ class adapter_example_externalcode(orbital):
     # 誤差評価の計算
     error = 0.0
     count = 0
-    for n in range(i_start, i_end):
+    # 基準データの x の範囲の外にある点は比べない（以前は配列の末尾へ回り込んでいた。既知の問題 6）
+    m_opt_list, flag_valid = super().find_bracket_index(self.x_ref, x_res[i_start:i_end])
+    if not np.all(flag_valid):
+      print(f'Warning: {int(np.sum(~flag_valid))} of {len(flag_valid)} points lie outside the reference data and are not compared')
+    for n, m_opt, flag in zip(range(i_start, i_end), m_opt_list, flag_valid):
+      if not flag:
+        continue
       count = count+1
-      for m in range(0,len(self.x_ref)):
-        if (self.x_ref[m] >= x_res[n] ):
-          m_opt = m
-          break
       grad_fact = ( x_res[n] - self.x_ref[m_opt-1] )/( self.x_ref[m_opt] - self.x_ref[m_opt-1] )
       y_ref_cor = ( self.y_ref[m_opt]  - self.y_ref[m_opt-1]  )*grad_fact + self.y_ref[m_opt-1]
       error = error + ( y_res[n] - y_ref_cor )**2 
 
+    if count == 0:
+      print('Warning: no computed point lies within the reference data')
+      return np.inf
     error = np.sqrt( error )/float( count ) + penalty
 
     # Green color
@@ -300,7 +301,11 @@ class adapter_example_externalcode(orbital):
     self.rewrite_control_file_code(parameter_opt)
 
     # Run Tacode
-    self.run_code()
+    flag_success = self.run_code()
+    if not flag_success:
+      if not args:
+        self.iter += 1
+      return np.atleast_1d(np.inf)
 
     # Read result for evaluating error
     result_dict = self.read_result_data()

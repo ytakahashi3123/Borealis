@@ -1,0 +1,40 @@
+# Borealis report verification case: ga_sphere
+# 解析解が既知のシフト付き球関数 f_k(x) = sum_i (x_i - 2(k-1))^2 (src/adapter_template/adapter_simple_function.py)
+adapter:
+  kind_adapter: simple_function
+optimizer:
+  seed: 20261019
+  kind_optimizer: GA
+objectives:
+  num_objectives: 1
+parameter_optimized:
+  boundary:
+    - name: 'simple_function'
+      component:
+        - {type: x1, bound_min: -10, bound_max: 10}
+        - {type: x2, bound_min: -10, bound_max: 10}
+        - {type: x3, bound_min: -10, bound_max: 10}
+        - {type: x4, bound_min: -10, bound_max: 10}
+        - {type: x5, bound_min: -10, bound_max: 10}
+  flag_penalty: False
+  penalty_value: 1000.0
+reference:
+simple_function:
+  result_dir: result_function
+  flag_output: False
+  filename_output: output_function.dat
+  function_discrete: 100
+  function_bound_min: -10
+  function_bound_max: 10
+GA:
+  num_generation: 100
+  num_population: 20
+  maximize: False
+  crossover_rate: 0.9
+  eta_crossover: 15.0
+  eta_mutation: 20.0
+  windowsize_residual: 5
+  tolerance_residual: 1.e-12
+  result_dir: result_GA
+  filename_output: output_GA.dat
+  filename_global: output_global.dat

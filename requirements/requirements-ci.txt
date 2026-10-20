@@ -1,0 +1,7 @@
+# CI とテストに使うパッケージ（.github/workflows/ci.yml）
+#   python3 -m pip install -r requirements/requirements-ci.txt
+numpy>=1.22.3
+PyYAML>=5.3.1
+mpi4py>=3.0.3
+bayesian-optimization>=3.0
+pytest>=7

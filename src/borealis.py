@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 
 # Borealis: Bayesian optimization for finding a realizable solution for a discretized equation
-# Version 1.6.0
-# Date: 2026/08/31
+# Version: see the `version` constant below (single source of truth)
+# Date: 2026/10/20
 
 # Author: Yusuke Takahashi, Hokkaido University
 # Contact: ytakahashi@eng.hokudai.ac.jp
 
 code_name = "Borealis"
-version = "1.6.1"
+version = "1.7.0"
 
+import sys
 import numpy as np
 from mpi.mpi import mpi
 from orbital.orbital import orbital
+from config_check.config_check import check_config
 
 def main():
 
@@ -27,6 +29,18 @@ def main():
   arg          = orbit.argument(file_control_default)
   file_control = arg.file
   config       = orbit.read_config_yaml(file_control)
+
+  # Check keys of the configuration file (unknown keys are otherwise silently ignored)
+  if mpi_instance.rank == 0:
+    for message in check_config(config):
+      print('Warning in', file_control, ':', message)
+
+  # Random seed (optional). Each rank gets its own stream
+  seed = config.get('optimizer', {}).get('seed')
+  if seed is not None:
+    np.random.seed( int(seed) + mpi_instance.rank )
+    if mpi_instance.rank == 0:
+      print('Random seed:', int(seed), '(+ rank)')
 
   # Select adapter
   if config['adapter']['kind_adapter'] == 'tacode':
@@ -47,19 +61,14 @@ def main():
   elif config['adapter']['kind_adapter'] == 'shapeoptimizer':
     from adapter_shapeoptimizer.adapter_shapeoptimizer import adapter_shapeoptimizer
     adapter = adapter_shapeoptimizer(mpi_instance)
-  elif config['adapter']['kind_adapter'] == 'shapeoptimizer_mp':
-    from adapter_shapeoptimizer_mp.adapter_shapeoptimizer import adapter_shapeoptimizer
-    adapter = adapter_shapeoptimizer(mpi_instance)
   elif config['adapter']['kind_adapter'] == 'pixelflow':
     from adapter_pixelflow.adapter_pixelflow import adapter_pixelflow
     adapter = adapter_pixelflow(mpi_instance)
   elif config['adapter']['kind_adapter'] == 'user':
-    from adapter_user.adapter_user import adapter_user
+    from hidden_adapter_user.adapter_user import adapter_user
     adapter = adapter_user(mpi_instance)
   else:
-    print('Error, invalid adapter is selected. Check adapter.kind_adapter in',file_control,':', config['adapter']['kind_adapter'])
-    print('Program stopped.')
-    exit()
+    orbit.stop_program(f"Error, invalid adapter is selected. Check adapter.kind_adapter in {file_control}: {config['adapter']['kind_adapter']}", mpi_instance)
 
   # Initialize for simulation software defined in adapter
   adapter.initial_settings(config)
@@ -77,19 +86,14 @@ def main():
   elif config['optimizer']['kind_optimizer'] == 'PSO':
     from optimizer_pso.optimizer_pso import optimizer_pso
     optimizer = optimizer_pso(mpi_instance)
-  elif config['optimizer']['kind_optimizer'] == 'PSO_mp':
-    from optimizer_pso_mp.optimizer_pso import optimizer_pso
-    optimizer = optimizer_pso(mpi_instance)
   elif config['optimizer']['kind_optimizer'] == 'ABC':
     from optimizer_abc.optimizer_abc import optimizer_abc
     optimizer = optimizer_abc(mpi_instance)
-  #elif config['optimizer']['kind_optimizer'] == 'GA':
-  #  from optimizer_ga.optimizer_ga import optimizer_ga
-  #  optimizer = optimizer_ga(mpi_instance)
+  elif config['optimizer']['kind_optimizer'] == 'GA':
+    from optimizer_ga.optimizer_ga import optimizer_ga
+    optimizer = optimizer_ga(mpi_instance)
   else:
-    print('Error, invalid optimizer is selected. Check optimizer.kind_optimizer in',file_control,':', config['optimizer']['kind_optimizer'])
-    print('Program stopped.')
-    exit()
+    orbit.stop_program(f"Error, invalid optimizer is selected. Check optimizer.kind_optimizer in {file_control}: {config['optimizer']['kind_optimizer']}", mpi_instance)
 
   # Initial setting
   optimizer.initial_setting(config)
@@ -111,5 +115,5 @@ if __name__ == '__main__':
   main()
 
   print('Finalize optimization process')
-  exit()
+  sys.exit(0)
 

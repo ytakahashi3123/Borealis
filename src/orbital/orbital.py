@@ -2,6 +2,8 @@
 
 import numpy as np
 import os as os
+import sys as sys
+import subprocess as subprocess
 import time as time
 from functools import wraps
 from general.general import general
@@ -25,13 +27,14 @@ class orbital(general):
 
 
   def get_directory_path(self, path_specify, default_path, manual_path):
+    # default/auto: src/orbital/ からの相対パス。以前は区切りなしで連結していたため存在しないパスになっていた（既知の問題 26）
     script_directory = os.path.dirname(os.path.realpath(__file__))
     if path_specify == 'auto' or path_specify == 'default':
-      directory_path = script_directory + default_path
+      directory_path = os.path.normpath( os.path.join(script_directory, default_path) )
     elif path_specify == 'manual':
       directory_path = manual_path
     else :
-      directory_path = script_directory + default_path
+      raise ValueError(f"directory_path_specify must be 'manual', 'default' or 'auto': {path_specify}")
     return directory_path
 
 
@@ -77,15 +80,14 @@ class orbital(general):
     if ( timeunit_system == 'day'):
       unit_covert_timeunit = self.unit_covert_day2sec
     elif ( timeunit_system == 'hour'):
-      unit_covert_timeunit = self.duration_min2hour*self.duration_hour2day
+      # 1 時間の秒数。以前は duration_min2hour*duration_hour2day (= 1436.07) になっていた（既知の問題 3）
+      unit_covert_timeunit = self.duration_sec2min*self.duration_min2hour
     elif ( timeunit_system == 'min'):
       unit_covert_timeunit = self.duration_min2hour
     elif( timeunit_system == 'sec'):
       unit_covert_timeunit = 1.0
     else:
-      print('Error, timeunit is not correct (only day, hour, min., sec.): ',file_control)
-      print('Program stopped.')
-      exit()
+      raise ValueError(f"reference.timeunit must be day, hour, min or sec: {timeunit_system}")
   
     return unit_covert_timeunit
   
@@ -113,13 +115,13 @@ class orbital(general):
   
   #    print(np.sign(D_geo_tmp))
   
-  #    if( D_geo_tmp >= 0.0 ):
-      if( 1 in np.sign(D_geo_tmp) ):
+      # D >= 0 と D < 0 で式が分かれる。要素ごとに選ぶ（以前は「1 つでも正なら全要素を前者で」計算していた。既知の問題 14）
+      with np.errstate(invalid='ignore', divide='ignore'):
         S_geo_tmp = np.sqrt(D_geo_tmp) + Q_geo_tmp
         S_geo_tmp = np.sign(S_geo_tmp) * np.exp( np.log( np.abs(S_geo_tmp))/3.0 )
-        V_geo_tmp = - ( 2.0*Q_geo_tmp + (P_geo_tmp/S_geo_tmp - S_geo_tmp)**3 )/(3.0*P_geo_tmp)
-      else:
-        V_geo_tmp = 2.0 * np.sqrt( -P_geo_tmp ) * np.cos( np.arccos(Q_geo_tmp/np.sqrt( - P_geo_tmp**3 )) / 3.0)
+        V_geo_pos = - ( 2.0*Q_geo_tmp + (P_geo_tmp/S_geo_tmp - S_geo_tmp)**3 )/(3.0*P_geo_tmp)
+        V_geo_neg = 2.0 * np.sqrt( -P_geo_tmp ) * np.cos( np.arccos(Q_geo_tmp/np.sqrt( - P_geo_tmp**3 )) / 3.0)
+      V_geo_tmp = np.where( D_geo_tmp >= 0.0, V_geo_pos, V_geo_neg )
   
       G_geo_tmp = 0.5*( E_geo_tmp + np.sqrt(E_geo_tmp**2 + V_geo_tmp) )
       T_geo_tmp = np.sqrt( G_geo_tmp**2 + (F_geo_tmp - V_geo_tmp*G_geo_tmp)/(2.0*G_geo_tmp - E_geo_tmp )) - G_geo_tmp
@@ -198,9 +200,7 @@ class orbital(general):
         vec_conv_y = -np.array(vec_x)*np.sin(angle_rot) + np.array(vec_y)*np.cos(angle_rot)
         vec_conv_z =  np.array(vec_z)
       else :
-        print( 'Axis is not correct.' )
-        print( 'Program stopped. ')
-        exit()
+        raise ValueError(f'Axis is not correct: {axis}')
       return [vec_conv_x,vec_conv_y,vec_conv_z]
   
   
@@ -298,6 +298,71 @@ class orbital(general):
           return True
         count_tmp += 1
     return False
+
+  def find_bracket_index(self, x_ref, x):
+    # 昇順の x_ref の中で x_ref[m-1] <= x <= x_ref[m] となる m と、x が x_ref の範囲の内側かどうかを返す。
+    # 範囲の内側では、従来の「x_ref[m] >= x となる最初の m」と同じ m になる。範囲の外は valid = False で、
+    # 以前のように負の添字で配列の末尾を参照することはない（既知の問題 6）
+    x_ref = np.asarray(x_ref)
+    x = np.atleast_1d(x)
+    valid = (x >= x_ref[0]) & (x <= x_ref[-1])
+    m = np.clip( np.searchsorted(x_ref, x, side='left'), 1, len(x_ref)-1 )
+    return m, valid
+
+
+  def run_external_code(self, cmd_code, work_dir_case, filename_result=None):
+    # 外部コードを work_dir_case の中で起動し、終了を待つ。成功なら True を返す。
+    # - 子プロセスには dict(os.environ) を渡す。mpi4py の import (MPI_Init) で C 側に足される OMPI_*/PMIX_* を
+    #   継がせると、外部コードの mpirun が失敗するため（既知の問題 19）
+    # - os.chdir を使わず cwd で作業ディレクトリを渡す（プロセス全体に効くため）
+    # - テンプレートから写した古い結果ファイルを読まないよう、起動の前に消す（既知の問題 7）
+    if filename_result is not None:
+      filename_tmp = os.path.join(work_dir_case, filename_result)
+      if os.path.exists(filename_tmp):
+        os.remove(filename_tmp)
+    returncode = subprocess.call( [cmd_code], cwd=work_dir_case, env=dict(os.environ) )
+    flag_success = (returncode == 0)
+    if not flag_success:
+      print(f'Warning: external code returned exit status {returncode}: {work_dir_case}')
+    if filename_result is not None and not os.path.exists(os.path.join(work_dir_case, filename_result)):
+      print(f'Warning: result file was not written: {os.path.join(work_dir_case, filename_result)}')
+      flag_success = False
+    return flag_success
+
+
+  def stop_program(self, message, mpi_instance=None):
+    # 設定の誤りなどで止める。MPI 実行中は全ランクを止める（exit() では 1 ランクだけが抜け、他が待ち続けた。既知の問題 8）
+    print(message)
+    print('Program stopped.')
+    sys.stdout.flush()
+    if mpi_instance is not None and getattr(mpi_instance, 'flag_mpi', False):
+      mpi_instance.comm.Abort(1)
+    sys.exit(1)
+
+
+  def check_maximize_supported(self, objective_function, flag_maximize, label, mpi_instance=None):
+    # PSO・ABC は最大化の符号を目的関数に渡し、掛けるのはアダプタの側である。
+    # 符号を掛けないアダプタで maximize を指定すると、黙って最小化を続けていた（既知の問題 1）ので止める
+    adapter_instance = getattr(objective_function, '__self__', None)
+    if np.any(flag_maximize) and not getattr(adapter_instance, 'flag_apply_sign', False):
+      self.stop_program(f'[{label}-Borealis] Error: maximize is not supported by the selected adapter '
+                        f'({type(adapter_instance).__name__}); it returns an error to be minimized.', mpi_instance)
+    return
+
+
+  def sanitize_score(self, score, num_objectives, value_nonfinite, label):
+    # 目的関数の値を検査する。長さが目的の数と違えば止め、NaN・無限大は value_nonfinite に置き換える
+    # （NaN が np.argmin でアーカイブを乗っ取っていた。既知の問題 2）
+    score = np.atleast_1d( np.asarray(score, dtype=float) ).copy()
+    if score.size != num_objectives:
+      raise ValueError(f'[{label}-Borealis] The objective function returned {score.size} values, '
+                       f'but objectives.num_objectives is {num_objectives}')
+    flag_nonfinite = ~np.isfinite(score)
+    if np.any(flag_nonfinite):
+      print(f'[{label}-Borealis] Warning: non-finite objective value {score} is replaced by {value_nonfinite}')
+      score[flag_nonfinite] = value_nonfinite
+    return score
+
 
   # Decorator for time measurement
   def time_measurement_decorated(func):

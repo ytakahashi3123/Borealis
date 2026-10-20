@@ -4,9 +4,10 @@ current_dir=$(pwd)
 cd ${current_dir}
 
 source ${HOME}/venvs/myenv/bin/activate
-source ${HOME}/.bashrc_precice
-source ${HOME}/.bashrc_precice_su2
-source ${HOME}/.bashrc_precice_borealis
+source ${HOME}/.dir_opt_bashrc/.bashrc_precice-v320
+source ${HOME}/.dir_opt_bashrc/.bashrc_precice-v320_su2
+#source ${HOME}/.dir_opt_bashrc/.bashrc_precice-v320_python
+source ${HOME}/.dir_opt_bashrc/.bashrc_precice-v320_borealis
 
 parallel=true
 fluid=false
@@ -17,13 +18,20 @@ DIR_OPT=./optimization
 
 # Parallel
 MPIP=mpirun.openmpi
-ncpu_f=2
+# BOREALIS_NUM_CPU/BOREALIS_CPU_SET: Borealis(adapter_shapeoptimizer)から渡されるケースごとのコア数・コア番号
+ncpu_f=${BOREALIS_NUM_CPU:-2}
 ncpu_o=1
+if [ -n "${BOREALIS_CPU_SET}" ]; then
+  CPU_SET_OPT="--cpu-set ${BOREALIS_CPU_SET}"
+else
+  CPU_SET_OPT="--map-by core"
+fi
 
 # Fluid
 if ! $fluid ; then # Coupled
   #LD_F=${SU2_ADAPTER_HOME}/run/SU2_preCICE_FSI.py
-  LD_F=${HOME_BORE}/src_helper/src_tmp/SU2_preCICE_FSI.py
+  #LD_F=${HOME_BORE}/src_helper/src_tmp/SU2_preCICE_FSI.py
+  LD_F=${HOME_BORE}/src_interface/interface-SU2-OPT/SU2_preCICE_OPT.py
   LOG_F=log_su2
   INP_F=sphere.cfg
 else
@@ -33,7 +41,7 @@ else
 fi
 
 # Optimization
-PYHON=python3
+PYTHON=python3
 LD_O=${HOME_BORE}/src_interface/interface-shapeoptimizer/shapeoptimizer_preCICE.py
 LOG_O=log_shapeoptimization
 
@@ -54,13 +62,13 @@ for (( i = 0; i < ${#DIR_OUTPUT[*]}; i++ ))
 
 if ! $fluid ; then # Coupled
   if $parallel ; then
-    $MPIP -np $ncpu_f --report-bindings --bind-to core --map-by core ${PYHON} ${LD_F} -f ${INP_F} --parallel > $LOG_F 2>&1 &
+    $MPIP -np $ncpu_f --report-bindings --bind-to core ${CPU_SET_OPT} ${PYTHON} ${LD_F} -f ${INP_F} --parallel > $LOG_F 2>&1 &
   else
     ${LD_F} -f ${INP_F} -p SU2_CFD --parallel > $LOG_F 2>&1 &
   fi
 else # Uncoupled
   if $parallel ; then
-    $MPIP -np $ncpu_f ${LD_F} ${INP_F} > $LOG_F 2>&1 &
+    $MPIP -np $ncpu_f --bind-to core ${CPU_SET_OPT} ${LD_F} ${INP_F} > $LOG_F 2>&1 &
   else
     ${LD_F} ${INP_F} > $LOG_F 2>&1 &
   fi
@@ -77,7 +85,7 @@ if ! $fluid ; then
   else
     export OMP_NUM_THREADS=1
   fi
-  $PYHON $LD_O > $LOG_O 2>&1 &
+  $PYTHON $LD_O > $LOG_O 2>&1 &
   PIDParticipant2=$!
 fi
 cd ${current_dir}
@@ -91,6 +99,7 @@ else
 fi
 echo "(you may run 'tail -f ${Participant1}.log' in another terminal to check the progress)"
 
-wait &
+# Borealisはこのスクリプトの終了を計算終了とみなすため、バックグラウンドにせず待つ
+wait
 
 #touch timestamp_end_$(date "+%Y%m%d-%H%M%S")

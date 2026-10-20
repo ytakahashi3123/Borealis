@@ -1,8 +1,20 @@
 reference_tc/
-CHANGELOG.md
 hidden*
 testcase/work_cage
 testcase/work_shapeoptimizer/template/grids
 testcase/work_tacode_fortran/reference/ninja_20240122_20250610
 src_pilot
 
+
+# Python のキャッシュ、テストのキャッシュ
+__pycache__/
+.pytest_cache/
+
+# レポートの検証ケースの出力（report/run_verification.py が作る）と LaTeX の中間ファイル
+report/verification/*/result_*/
+report/verification/*/log_borealis
+report/*.aux
+report/*.log
+report/*.out
+report/*.toc
+report/*.dvi

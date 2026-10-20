@@ -62,10 +62,7 @@ class adapter_tacode(orbital):
      
     # Check code system
     if not ( (config['tacode']['code_system'] == 'python3' or config['tacode']['code_system'] == 'fortran') ):
-      print('Error, code system of tacode is not supported. Only Tacode-Python3 or Ttacode-Fortran are avaiable.')
-      print('Please check code system in configuration file of Borealis:',config['tacode']['code_system'])
-      print('Program stopped.')
-      exit()
+      super().stop_program(f"Error, tacode.code_system must be python3 or fortran: {config['tacode']['code_system']}", self.mpi_instance)
 
     # Variables of trajectory file computed by Tacode
     if config['tacode']['code_system'] == 'python3' :
@@ -287,11 +284,14 @@ class adapter_tacode(orbital):
     
     print('--Run code')
 
-    # Move to computing directory, run Tacode, and return to the original directory
-    os.chdir( self.work_dir_case )
-    subprocess.call( self.cmd_code )
-    os.chdir( self.root_dir )
+    # 終了ステータスと結果ファイルを確かめる（既知の問題 7）。子には MPI の環境変数を渡さない（既知の問題 19）
+    return super().run_external_code( self.cmd_code, self.work_dir_case, self.filename_result_code )
 
+
+  def warn_outside_reference(self, flag_valid):
+    num_outside = int( np.sum(~np.asarray(flag_valid)) )
+    if num_outside > 0:
+      print(f'Warning: {num_outside} of {len(flag_valid)} points lie outside the time range of the reference data and are not compared')
     return
 
 
@@ -325,12 +325,13 @@ class adapter_tacode(orbital):
     # 誤差評価の計算
     error_tmp = 0.0
     count_tmp = 0
-    for n in range(i_start, i_end):
+    # 基準データの時刻の範囲の外にある点は比べない（以前は配列の末尾へ回り込んでいた。既知の問題 6）
+    m_opt_list, flag_valid = super().find_bracket_index(self.time_day_opt, time_day_offset[i_start:i_end])
+    self.warn_outside_reference(flag_valid)
+    for n, m_opt, flag in zip(range(i_start, i_end), m_opt_list, flag_valid):
+      if not flag:
+        continue
       count_tmp = count_tmp+1
-      for m in range(0,len(self.time_day_opt)):
-        if (self.time_day_opt[m] >= time_day_offset[n] ):
-          m_opt = m
-          break
       grad_fact = ( time_day_offset[n] - self.time_day_opt[m_opt-1] )/( self.time_day_opt[m_opt] - self.time_day_opt[m_opt-1] )
 #      longitude_opt_cor = ( self.longitude_opt[m_opt] - self.longitude_opt[m_opt-1] )*grad_fact + self.longitude_opt[m_opt-1]
 #      latitude_opt_cor  = ( self.latitude_opt[m_opt]  - self.latitude_opt[m_opt-1]  )*grad_fact + self.latitude_opt[m_opt-1]
@@ -338,6 +339,9 @@ class adapter_tacode(orbital):
       error_tmp = error_tmp + ( altitude[n] - altitude_opt_cor )**2 
 
 #        error_tmp = error_tmp/float(count_tmp)
+    if count_tmp == 0:
+      print('Warning: no point of the computed trajectory lies within the reference data')
+      return np.inf
     error_tmp = np.sqrt( error_tmp )/float( count_tmp ) + penalty
 
     # Green color
@@ -395,15 +399,16 @@ class adapter_tacode(orbital):
     print("--time_sec_offset[i_end] :", time_day_offset[i_end]*orbital.unit_covert_day2sec)
     #---------------------------------------
     count_eval=0
-    for n in range(i_start, i_end):
+    # 基準データの時刻の範囲の外にある点は比べない（既知の問題 6）
+    m_opt_list, flag_valid = super().find_bracket_index(self.time_day_opt, time_day_offset[i_start:i_end])
+    self.warn_outside_reference(flag_valid)
+    for n, m_opt, flag in zip(range(i_start, i_end), m_opt_list, flag_valid):
       ############ temporary test ###############
       # if 文とその後のインデントはテスト中につき変更している．
       # count_eval+=1
       # if(count_eval%100==0):
-      for m in range(0,len(self.time_day_opt)):
-        if (self.time_day_opt[m] >= time_day_offset[n] ):
-          m_opt = m
-          break
+      if not flag:
+        continue
     #--------------Modified by Tomoki SAKAI 2024/7/23---------------------------  
       if ((self.time_day_opt[m_opt] - self.time_day_opt[m_opt-1]) > 1000/86400): # ここは秒→日換算ざっくりでいいので
         count_m_opt = count_m_opt + 1
@@ -455,12 +460,12 @@ class adapter_tacode(orbital):
       # tacode側を0として高度差計算
       extra_altitude_error = []
       print("count_tmp1", count_tmp)
-      for n in range(len(extra_day_list)):
+      m_opt_list, flag_valid = super().find_bracket_index(self.time_day_opt, extra_day_list)
+      self.warn_outside_reference(flag_valid)
+      for n, m_opt, flag in zip(range(len(extra_day_list)), m_opt_list, flag_valid):
+        if not flag:
+          continue
         count_tmp = count_tmp+1
-        for m in range(0,len(self.time_day_opt)):
-          if (self.time_day_opt[m] >= extra_day_list[n]):
-            m_opt = m
-            break
         if ((self.time_day_opt[m_opt] - self.time_day_opt[m_opt-1]) < 1000/86400):
           grad_fact = ( extra_day_list[n] - self.time_day_opt[m_opt-1] )/( self.time_day_opt[m_opt] - self.time_day_opt[m_opt-1] )
           # longitude_opt_cor = ( self.longitude_opt[m_opt] - self.longitude_opt[m_opt-1] )*grad_fact + self.longitude_opt[m_opt-1]
@@ -472,6 +477,9 @@ class adapter_tacode(orbital):
 
     ########################################
     print("count_tmp2", count_tmp)
+    if count_tmp == 0:
+      print('Warning: no point of the computed trajectory lies within the reference data')
+      return np.inf
     ave_error_alt = error_alt/float(count_tmp)
     error_cood = error_tmp_cood/float(count_tmp)
     print("ave_error_alt", ave_error_alt)
@@ -675,7 +683,11 @@ class adapter_tacode(orbital):
       self.rewrite_control_code_fortran(parameter_opt)
 
     # Run Tacode
-    self.run_code()
+    flag_success = self.run_code()
+    if not flag_success:
+      if not args:
+        self.iter += 1
+      return np.atleast_1d(np.inf)
 
     # Read result for evaluating error
     result_dict = self.read_result_data()

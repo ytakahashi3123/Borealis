@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import numpy as np
+from concurrent.futures import ThreadPoolExecutor
 from orbital.orbital import orbital
 
 
@@ -178,11 +179,17 @@ class optimizer_pso(orbital):
     #sign_of = -1.0 if flag_Maximization_of else 1.0
     flag_Maximization_of = config['PSO']['maximize']
     if isinstance(flag_Maximization_of, list):
+      if len(flag_Maximization_of) != num_objectives:
+        raise ValueError(f"[PSO-Borealis] Error: PSO.maximize has {len(flag_Maximization_of)} entries, but objectives.num_objectives is {num_objectives}")
       sign_of = np.array([-1.0 if f else 1.0 for f in flag_Maximization_of])
     elif isinstance(flag_Maximization_of, bool):
       sign_of = -1.0 if flag_Maximization_of else 1.0
     else:
       raise ValueError("[PSO-Borealis] Error: config['PSO']['maximize'] must be True/False or a list.")
+    super().check_maximize_supported(objective_function, flag_Maximization_of, 'PSO', self.mpi_instance)
+
+    # 目的関数が NaN・無限大を返したときに置き換える値（最小化の向きで十分に悪い値）
+    value_nonfinite = float( config['parameter_optimized'].get('value_nonfinite', 1.0e+30) )
 
     # MPI settings
     flag_mpi = self.mpi_instance.flag_mpi
@@ -191,14 +198,30 @@ class optimizer_pso(orbital):
       comm = self.mpi_instance.comm
       size = self.mpi_instance.size
       rank = self.mpi_instance.rank
-      particle_size = num_particle // size
-      num_particle_start = rank * particle_size
-      num_particle_end   = (rank + 1) * particle_size if rank < size - 1 else num_particle
+      if num_particle < size:
+        super().stop_program(f'[PSO-Borealis] Error: PSO.num_particle ({num_particle}) is smaller than the number of processes ({size})', self.mpi_instance)
+      # 粒子を均等に分ける（以前は余りが最後のランクに集まっていた。既知の問題 9）
+      indices_per_proc = np.array_split( np.arange(num_particle), size )
+      num_particle_start = int( indices_per_proc[rank][0] )
+      num_particle_end   = int( indices_per_proc[rank][-1] ) + 1
       print(f'[PSO-Borealis] Rank: {rank}, Iter_start: {num_particle_start}, Iter_zend: {num_particle_end}')
     else :
       rank = 0
       num_particle_start = 0
       num_particle_end = num_particle
+
+    # Number of concurrent evaluations of objective function in each process (thread-based)
+    # 外部コード(MPI並列)を呼ぶアダプタ向け。BorealisをMPIで起動すると子プロセスのmpirunが失敗するため、
+    # Borealisは1プロセスで起動し、粒子の評価をスレッドで同時実行する。スレッド安全なアダプタのみ対応
+    num_parallel = int( config['PSO'].get('num_parallel', 1) )
+    if num_parallel > 1:
+      adapter_instance = getattr(objective_function, '__self__', None)
+      if not getattr(adapter_instance, 'flag_parallel_evaluation', False):
+        super().stop_program(f'[PSO-Borealis] Error: PSO.num_parallel > 1 is not supported by the selected adapter: {type(adapter_instance).__name__}', self.mpi_instance)
+      print(f'[PSO-Borealis] Number of concurrent evaluations: {num_parallel}')
+      executor = ThreadPoolExecutor(max_workers=num_parallel)
+    else:
+      executor = None
 
     # Initialize particles
     particle_position = []
@@ -260,10 +283,20 @@ class optimizer_pso(orbital):
       local_scores = []
       leader_position = None
       
-      for i in range(num_particle_start, num_particle_end):
-        # パーソナルベストの更新: 下記のreshape追加の理由、Bayesian Optの引数が(1,dim)の次元になるので、それに合わせている。
+      # 目的関数の評価: 下記のreshape追加の理由、Bayesian Optの引数が(1,dim)の次元になるので、それに合わせている。
+      def evaluate_particle(i):
         id_serial = n*num_particle + i + 1
         score = objective_function( particle_position[i].reshape(1, num_dimension), id_serial, n, sign_of )
+        return self.sanitize_score( score, num_objectives, value_nonfinite, "PSO" )
+      particle_indices = range(num_particle_start, num_particle_end)
+      if executor is None:
+        scores = [ evaluate_particle(i) for i in particle_indices ]
+      else:
+        scores = list( executor.map(evaluate_particle, particle_indices) )
+
+      for i, score in zip(particle_indices, scores):
+        # パーソナルベストの更新
+        id_serial = n*num_particle + i + 1
 
         particle_solution[n,i,:] = score
         if self.dominates(score, particle_best_score[i]):
@@ -416,6 +449,9 @@ class optimizer_pso(orbital):
         if flag_residual and flag_archive:
           num_optiter_optimized = n+1
           break
+
+    if executor is not None:
+      executor.shutdown()
 
     # MPI process for history data
     if flag_mpi :
