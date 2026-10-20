@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 
 # Borealis: Bayesian optimization for finding a realizable solution for a discretized equation
-# Version 1.5.2
-# Date: 2026/04/30
+# Version 1.6.0
+# Date: 2026/08/31
 
 # Author: Yusuke Takahashi, Hokkaido University
 # Contact: ytakahashi@eng.hokudai.ac.jp
 
 code_name = "Borealis"
-version = "1.5.2"
+version = "1.6.1"
 
 import numpy as np
 from mpi.mpi import mpi
@@ -50,6 +50,9 @@ def main():
   elif config['adapter']['kind_adapter'] == 'shapeoptimizer_mp':
     from adapter_shapeoptimizer_mp.adapter_shapeoptimizer import adapter_shapeoptimizer
     adapter = adapter_shapeoptimizer(mpi_instance)
+  elif config['adapter']['kind_adapter'] == 'pixelflow':
+    from adapter_pixelflow.adapter_pixelflow import adapter_pixelflow
+    adapter = adapter_pixelflow(mpi_instance)
   elif config['adapter']['kind_adapter'] == 'user':
     from adapter_user.adapter_user import adapter_user
     adapter = adapter_user(mpi_instance)

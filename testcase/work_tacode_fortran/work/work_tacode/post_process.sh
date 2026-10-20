@@ -1,7 +1,10 @@
 #!/bin/bash
 
-PYTHON=python3.9
-LD_DIR=../../../../src_helper
+source $HOME/venvs/myenv/bin/activate
+source $HOME/.dir_opt_bashrc/.bashrc_precice-v320_borealis
+
+PYTHON=python3
+LD_DIR=$HOME_BORE/src_helper
 LOG=log_postprocess
 
 # Delete files

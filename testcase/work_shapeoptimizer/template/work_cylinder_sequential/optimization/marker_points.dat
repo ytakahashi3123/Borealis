@@ -1,7 +1,0 @@
-TITLE = "Marker Points"
-VARIABLES = "lx", "ly", "lz", "node_id", "nx", "ny", "nz", "triangle_id"
-ZONE T="MarkerPointData", I=4, F=POINT
-0.0  0.0  0.0 1 0.0  0.0  0.0 1
-0.2  0.0  0.0 2 0.2  0.0  0.0 2
-0.1  0.1  0.0 3 0.1  0.1  0.0 3
-0.1 -0.1  0.0 1 0.1 -0.1  0.0 4

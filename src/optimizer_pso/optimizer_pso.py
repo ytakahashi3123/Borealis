@@ -161,10 +161,10 @@ class optimizer_pso(orbital):
     num_optiter_optimized = num_optiter
 
     # Convergence parameters for single/multi-objective optimization
-    windowsize_residual = config['PSO'].get('windowsize_residual',20)
-    tolerance_residual  = config['PSO'].get('tolerance_residual',1e-5)
-    windowsize_archive  = config['PSO'].get('windowsize_archive',2)
-    tolerance_archive   = config['PSO'].get('tolerance_archive',1.0)
+    windowsize_residual = int( config['PSO'].get('windowsize_residual',20) )
+    tolerance_residual  = float( config['PSO'].get('tolerance_residual',1e-5) )
+    windowsize_archive  = int( config['PSO'].get('windowsize_archive',5) )
+    tolerance_archive   = float( config['PSO'].get('tolerance_archive',1.0) )
     
     # Particle parameters
     inertia        = config['PSO']['inertia']
@@ -172,10 +172,17 @@ class optimizer_pso(orbital):
     social_coef    = config['PSO']['social_coef']
 
     # Maximization or minimization of the objective function
+    #flag_Maximization_of = config['PSO']['maximize']
+    #if not isinstance(flag_Maximization_of, bool):
+    #  raise ValueError("[PSO-Borealis] Error: config['PSO']['maximize'] must be True or False.")
+    #sign_of = -1.0 if flag_Maximization_of else 1.0
     flag_Maximization_of = config['PSO']['maximize']
-    if not isinstance(flag_Maximization_of, bool):
-      raise ValueError("[PSO-Borealis] Error: config['PSO']['maximize'] must be True or False.")
-    sign_of = -1.0 if flag_Maximization_of else 1.0
+    if isinstance(flag_Maximization_of, list):
+      sign_of = np.array([-1.0 if f else 1.0 for f in flag_Maximization_of])
+    elif isinstance(flag_Maximization_of, bool):
+      sign_of = -1.0 if flag_Maximization_of else 1.0
+    else:
+      raise ValueError("[PSO-Borealis] Error: config['PSO']['maximize'] must be True/False or a list.")
 
     # MPI settings
     flag_mpi = self.mpi_instance.flag_mpi

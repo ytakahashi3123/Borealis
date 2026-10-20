@@ -10,7 +10,7 @@ PYTHON=python
 LD=$HOME_BORE/src/borealis.py
 LOG=log_borealis
 
-MPIP=mpirun
+MPIP=mpirun.openmpi
 num_process=8
 
 touch timestamp_start_$(date "+%Y%m%d-%H%M%S")

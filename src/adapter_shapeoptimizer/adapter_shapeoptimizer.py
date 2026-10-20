@@ -159,7 +159,7 @@ class adapter_shapeoptimizer(orbital):
 
     # Indexes and powers
     #self.index_var_of = config['shapeoptimizer']['index_variable_objectivefunction']
-    self.power_var_of = config['shapeoptimizer']['power_variable_objectivefunction']
+    #self.power_var_of = config['shapeoptimizer']['power_variable_objectivefunction']
 
     return
 
@@ -344,12 +344,23 @@ class adapter_shapeoptimizer(orbital):
     print(f"[ShapeOpt-Borealis] PID {pid} and Step {step+1}: Read {filename_forces_series}\n", f"Forces and Moments: {self.forces_marker} {self.moments_marker} ")
 
     # Penalty
-    penalty = 0.0
+    #penalty = 0.0
+    #if self.config['parameter_optimized']['flag_penalty']:
+    #  boundary = self.config['parameter_optimized']['boundary']
+    #  huge_tmp = self.config['parameter_optimized']['penalty_value']
+    #  penalty = super().get_penalty_term(parameter_opt, boundary, huge_tmp)
     if self.config['parameter_optimized']['flag_penalty']:
-      boundary = self.config['parameter_optimized']['boundary']
-      huge_tmp = self.config['parameter_optimized']['penalty_value']
-      penalty = super().get_penalty_term(parameter_opt, boundary, huge_tmp)
-    
+      boundary  = self.config['parameter_optimized']['boundary']
+      huge_tmp  = self.config['parameter_optimized']['penalty_value']
+      if isinstance(huge_tmp, list):
+        # 目的ごとに異なるペナルティ
+        penalty = np.array([ super().get_penalty_term(parameter_opt, boundary, h) for h in huge_tmp ])
+      else:
+        # スカラー：全目的に同じペナルティ
+        penalty = super().get_penalty_term(parameter_opt, boundary, huge_tmp)
+    else:
+      penalty = 0.0
+
     # Get surface area
     if self.flag_surfacearea_constraint:
       surfacearea, surfacearea_init = self.read_surfaceares_marker(filename_surfacearea_series)
@@ -359,8 +370,8 @@ class adapter_shapeoptimizer(orbital):
         penalty = penalty + self.config['shapeoptimizer']['penalty_surfacearea']
 
     # Evaluate error
-    force_tmp = self.forces_marker[0]**self.power_var_of[0] * self.forces_marker[1]**self.power_var_of[1]
-    error = sign_of * abs( force_tmp ) + penalty
+    error = sign_of * np.array([ self.forces_marker[0], self.moments_marker[0] ]) + penalty
+    error = sign_of * np.array([ self.forces_marker[0], self.moments_marker[0] ]) + penalty
 
     # カウンタの更新
     if not args:

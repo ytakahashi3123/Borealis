@@ -289,21 +289,15 @@ class orbital(general):
         count_tmp += 1
     return 0.0
 
-
-  def extract_number_from_prefixed_string(str1, str0):
-    # "absorption_solar: 0.3"のようなymlファイル内の設定変数がネストしているかどうか確認
-    # str1がstr0で始まるか確認
-    if str1.startswith(str0):
-      # str0をstr1から削除
-      remaining_str = str1[len(str0):].strip()
-      try:
-        # 残った文字列が数値に変換可能か確認
-        number = float(remaining_str)
-        return False
-      except ValueError:
-        return True
-    return True
-
+  def get_penalty_flag(self, parameter_opt, boundary):
+    count_tmp = 0
+    for n, param in enumerate(boundary):
+      for m, component in enumerate(param['component']):
+        param_value = parameter_opt[0, count_tmp]
+        if not (component['bound_min'] <= param_value <= component['bound_max']):
+          return True
+        count_tmp += 1
+    return False
 
   # Decorator for time measurement
   def time_measurement_decorated(func):

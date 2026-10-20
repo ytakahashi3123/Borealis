@@ -11,10 +11,11 @@ optimizer:
 
 
 objectives:
-   num_objectives: 2
+  num_objectives: 2
 
 
 parameter_optimized:
+
   # Parameter boundaries
   boundary:
     - name: 'simple_function'
@@ -36,7 +37,9 @@ parameter_optimized:
           bound_max:  10
   # Penalty
   flag_penalty: False
-  penalty_value: 1000.0
+  penalty_value:
+    - 1000.0
+    - 1000.0
 
 
 Bayesian_optimization:
@@ -78,10 +81,15 @@ PSO:
   num_particle: 20
 
   # Minimize or maximize the objective function
-  maximize: False
+  maximize: 
+    - False
+    - False
 
-  # Tolerance of effor of objective function
-  tolerance: 1.e-10
+  # Tolerance of convergence
+  windowsize_residual: 5     # 残差：このステップ数以降に収束判定を開始する
+  tolerance_residual: 1.e-10 # 粒子ベスト値残差の収束判定(前ステップとの差)
+  windowsize_archive: 2      # アーカイブ重心：このステップ数以降に収束判定を開始する
+  tolerance_archive: 1.0    # アーカイブスコアの重心変化がこの値に収まっていれば収束判定
 
   # Particle parameter for PSO
   inertia: 0.5
