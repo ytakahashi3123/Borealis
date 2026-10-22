@@ -11,8 +11,10 @@ Borealis の詳細なレポート。`../README.md` より踏み込んで、問�
 | `borealis_config_ja.pdf`（`config_reference_ja.md`） | 設定ファイル `borealis.yml` のキーの一覧（日本語） |
 | `borealis.sty` | 日英で共通の体裁（ページ、フォント、表、表題） |
 | `md_to_tex.py` | `config_reference_ja.md` を LaTeX の本文に直す |
-| `verification/<ケース>/borealis.yml` | 検証ケース（5 次元のずらした球関数。PSO・GA の単目的と 2 目的、ABC、ベイズ最適化） |
+| `verification/<ケース>/borealis.yml` | 検証ケース（5 次元のずらした球関数。PSO・ABC・GA の単目的と 2 目的、ベイズ最適化） |
 | `run_verification.py` | 検証ケースを、numpy の乱数の種を固定して走らせる |
+| `run_pso_schedule.py` | PSO の重み係数の決め方を、Rastrigin 関数と球関数で、種を 30 通り変えて比べる |
+| `data/pso_schedule_*.dat` | `run_pso_schedule.py` の結果（それまでの最良と慣性の重みの、30 回の中央値。終わりの値のまとめ） |
 | `data/parallel_*.dat` | 並列評価の測定（2026-10-19、開発機）。ケースごとの開始・終了の時刻とコアの固定 |
 | `figure/*.png` | 図。`make_figures.py` が作る |
 | `make_figures.py` | 検証ケースの結果と `data/` から図を作り直す |
@@ -23,6 +25,7 @@ Borealis の詳細なレポート。`../README.md` より踏み込んで、問�
 ```
 cd report
 make verify        # 検証ケースを走らせる（数秒。乱数の種を固定するので毎回同じ答えになる）
+make schedule      # PSO の重み係数の比べ（約 30 秒。これも種を固定してある）
 make figure        # 図を作り直す
 make               # PDF を作る（日英と設定の一覧）
 make en            # 英語版だけ

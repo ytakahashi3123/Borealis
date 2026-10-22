@@ -76,7 +76,7 @@ simple_function:
 
 | キー | 既定 | 選べる値 | 説明・注意 |
 |---|---|---|---|
-| `objectives.num_objectives` | 1（PSO・GA）／必須（`simple_function`） | 整数 | 目的関数の数。2 以上で PSO は非劣解のアーカイブ、GA は NSGA-II の多目的になる。出力の `Error_k`・`Objective_k` の列の数もこれで決まる。**ABC とベイズ最適化は単目的だけ** |
+| `objectives.num_objectives` | 1（PSO・ABC・GA）／必須（`simple_function`） | 整数 | 目的関数の数。2 以上で PSO は非劣解のアーカイブ、GA は NSGA-II、ABC は支配関係と外部アーカイブによる多目的になる。出力の `Error_k`・`Objective_k` の列の数もこれで決まる。**ベイズ最適化は単目的だけ** |
 
 ## parameter_optimized
 
@@ -119,9 +119,14 @@ simple_function:
 |---|---|---|---|
 | `PSO.num_particle` | 必須 | 整数 | 粒子の数。MPI では均等に分ける（`np.array_split`）。プロセス数より少ないと止まる |
 | `PSO.num_optiter` | 必須 | 整数 | 反復（ステップ）の最大の数 |
-| `PSO.inertia` | 必須 | 数値 | 慣性の重み `w` |
-| `PSO.cognitive_coef` | 必須 | 数値 | 個人の最良へ向かう係数 `c1` |
-| `PSO.social_coef` | 必須 | 数値 | リーダーへ向かう係数 `c2` |
+| `PSO.inertia` | 必須\* | 数値 | 慣性の重み `w`。\*`inertia_schedule: constant`（既定）のとき必須で、ほかでは読まない |
+| `PSO.cognitive_coef` | 必須\* | 数値 | 個人の最良へ向かう係数 `c1`。\*`coefficient_schedule: constant`（既定）のとき必須で、ほかでは読まない |
+| `PSO.social_coef` | 必須\* | 数値 | リーダーへ向かう係数 `c2`。\*同上 |
+| `PSO.inertia_schedule` | `constant` | `constant`・`linear`・`adaptive` | 慣性の重みの決め方。`constant` は `inertia` で一定（以前と同じ答え）。`linear` は `inertia_max` から `inertia_min` へステップとともに線形に下げる。`adaptive` は、そのステップで個人の最良を更新した粒子の割合 `S` から `w = inertia_min + (inertia_max − inertia_min)·S`（停滞すると小さくなる）。進み具合は `num_optiter` を基準にする。局所解の多い問題では `adaptive` と `c1 = c2 = 1.5` を先に試すとよい（レポートの「PSO の重み係数」） |
+| `PSO.inertia_max`・`PSO.inertia_min` | 0.9・0.4 | 数値 | `linear`・`adaptive` での `w` の上限と下限 |
+| `PSO.coefficient_schedule` | `constant` | `constant`・`linear` | 加速係数の決め方。`linear` は `c1` を `cognitive_coef_initial` から `cognitive_coef_final` へ、`c2` を `social_coef_initial` から `social_coef_final` へ線形に変える（TVAC） |
+| `PSO.cognitive_coef_initial`・`cognitive_coef_final` | 2.5・0.5 | 数値 | `coefficient_schedule: linear` での `c1` の始めと終わり |
+| `PSO.social_coef_initial`・`social_coef_final` | 0.5・2.5 | 数値 | `coefficient_schedule: linear` での `c2` の始めと終わり |
 | `PSO.maximize` | 必須 | `True`・`False`、または目的ごとのリスト（要素の数は `num_objectives`） | 最大化なら符号 −1 を目的関数に渡す。**符号を掛けるのはアダプタの側**で、対応しているのは `shapeoptimizer`・`simple_function`。**ほかのアダプタで真にすると止まる**（誤差を返すので最大化に意味が無い。既知の問題 1） |
 | `PSO.windowsize_residual` | 20 | 整数 | 収束判定で、何ステップ前の個人の最良と比べるか |
 | `PSO.tolerance_residual` | 1e-5 | 数値 | 個人の最良の相対変化の平均がこれ以下で収束とする |
@@ -137,7 +142,7 @@ simple_function:
 
 ## ABC
 
-`src/optimizer_abc/optimizer_abc.py`。単目的だけ。
+`src/optimizer_abc/optimizer_abc.py`。`num_objectives` が 2 以上なら多目的（支配関係で採否を決め、非劣解を外部のアーカイブに集める。レポートの「人工蜂コロニー」の節）。
 
 | キー | 既定 | 選べる値 | 説明・注意 |
 |---|---|---|---|
@@ -145,11 +150,14 @@ simple_function:
 | `ABC.num_onlook_bees` | 必須 | 整数 | 追従蜂の数。古い名前 `num_onlook_bee` も読む（警告が出る） |
 | `ABC.visit_limit` | 必須 | 整数 | 食料源を捨てるまでの、改善しなかった回数の上限（これを超えたら偵察蜂が作り直す。最良の食料源も対象）。古い綴り `vist_limit` も読む（警告が出る） |
 | `ABC.num_optiter` | 必須 | 整数 | 反復の最大の数 |
-| `ABC.tolerance` | 必須 | 数値 | `windowsize_residual` ステップ前の解からの相対変化の平均がこれ以下で打ち切る。改善の無いステップでは 0 になるので、早く止まりすぎるなら `windowsize_residual` を大きくする（既知の問題 5） |
+| `ABC.tolerance` | 必須 | 数値 | 単目的だけ（多目的では読むが判定に使わない）。`windowsize_residual` ステップ前の解からの相対変化の平均がこれ以下で打ち切る。改善の無いステップでは 0 になるので、早く止まりすぎるなら `windowsize_residual` を大きくする（既知の問題 5） |
 | `ABC.windowsize_residual` | 1 | 整数 | 収束判定で比べる相手（何ステップ前の解か）。最初のこのステップ数は判定しない |
 | `ABC.num_parallel` | 1 | 整数 | 1 プロセスの中で同時に評価する候補の数（スレッド）。対応するアダプタだけ。2 以上では、雇用蜂の候補を段の始まりの食料源から作るので、逐次とは答えが変わる（並列の数にはよらない）。初期化・追従蜂・偵察蜂は逐次と同じ |
-| `ABC.maximize` | `False` | `True`・`False`（リストは不可） | PSO と同じく、符号を掛けるのはアダプタの側。対応しないアダプタでは止まる |
-| `ABC.result_dir`・`filename_output`・`filename_global` | 必須 | 文字列 | PSO と同じ。`filename_global` には、各ステップの時点での**それまでの最良**を書く（1.7.0 から。既知の問題 16） |
+| `ABC.maximize` | `False` | `True`・`False`、または目的ごとのリスト（要素の数は `num_objectives`） | PSO と同じく、符号を掛けるのはアダプタの側。対応しないアダプタでは止まる |
+| `ABC.num_archive` | 100 | 整数 | 多目的だけ。アーカイブの大きさの上限。超えたら混雑距離の最も小さい点から捨てる |
+| `ABC.windowsize_archive` | 5 | 整数 | 多目的だけ。何ステップ前のアーカイブの重心と比べるか |
+| `ABC.tolerance_archive` | 0 | 数値 | 多目的だけ。アーカイブの重心の移動がこれ以下なら止める。既定の 0 では、アーカイブが `windowsize_archive` ステップのあいだ変わらなかったときだけ止まる。**PSO の同じ名前のキーとは既定が違う**（PSO は 1.0） |
+| `ABC.result_dir`・`filename_output`・`filename_global` | 必須 | 文字列 | PSO と同じ。`filename_global` には、単目的では各ステップの時点での**それまでの最良**を書く（1.7.0 から。既知の問題 16）。多目的では各ステップのアーカイブ（全ステップの評価から作ったもの）を PSO・GA と同じ形で書く |
 
 ## GA
 
@@ -228,10 +236,12 @@ simple_function:
 
 `src/adapter_template/adapter_simple_function.py`。外部コードの要らない、解析的な目的関数。
 目的関数は `f_k(x) = Σ_i (x_i − 2(k−1))^2`（`k = 1, …, num_objectives`）で、ずらした球関数である。
+`function_type: rastrigin` では、同じ位置に最小 0 を持つ Rastrigin 関数 `f_k(x) = Σ_i [z_i^2 − 10 cos(2π z_i) + 10]`、`z_i = x_i − 2(k−1)` になる（整数の格子点の近くに局所解がある）。
 最大化の符号に対応し、スレッドからの同時の評価（`PSO.num_parallel`）にも対応している（テストと検証に使う）。
 
 | キー | 既定 | 選べる値 | 説明・注意 |
 |---|---|---|---|
+| `simple_function.function_type` | `sphere` | `sphere`・`rastrigin` | 関数の種類 |
 | `simple_function.flag_output` | 必須 | `True`・`False` | 関数の形を 1 次元で書き出す。**真のときは `num_objectives` が 2 以上でないと止まる**（2 列目を書くため） |
 | `simple_function.result_dir`・`filename_output`・`function_discrete`・`function_bound_min`・`function_bound_max` | 必須\*（上が真） | 文字列・文字列・整数・数値・数値 | 書き出しの場所と、標本点の数・範囲 |
 

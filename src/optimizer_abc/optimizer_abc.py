@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
 
+# 人工蜂コロニー (ABC; Karaboga, 2005)。雇用蜂・追従蜂・偵察蜂の 3 段で食料源（候補）を更新する。
+# 目的が 2 つ以上 (objectives.num_objectives >= 2) のときは多目的 ABC にする:
+#   - 食料源の採否: 候補が今の食料源を支配すれば置き換え、互いに支配しなければ確率 1/2 で置き換える
+#   - 追従蜂の選択: 食料源の非劣解の順位 r（0 が第 1 フロント）から、適応度 1/(1+r) のルーレットで選ぶ
+#   - 評価したすべての点から非劣解を外部アーカイブに集め、num_archive を超えたら混雑距離の小さいものから捨てる
+# 単目的の動作は、多目的を入れる前と同じ（同じ乱数の種で同じ答え）。
+
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from orbital.orbital import orbital
@@ -19,6 +26,9 @@ class optimizer_abc(orbital):
     self.str_error       = 'solution'
     self.str_best_index  = 'best_index'
     self.str_id_history  = 'ID_history'
+    self.str_archive_id       = 'archive_id'
+    self.str_archive_position = 'archive_position'
+    self.str_archive_score    = 'archive_score'
 
     self.text_color = '\033[96m'
     self.text_end = '\033[0m'
@@ -123,23 +133,50 @@ class optimizer_abc(orbital):
     windowsize_residual = int( config['ABC'].get('windowsize_residual', 1) )
     num_dimension = self.num_dimension
 
-    # Maximization or minimization of the objective function (PSOと同様の仕組み)
+    # 目的の数。2 以上で多目的
+    num_objectives = int( config.get('objectives', {}).get('num_objectives', 1) )
+    flag_multi = num_objectives > 1
+
+    # Maximization or minimization of the objective function (PSOと同様の仕組み。多目的では目的ごとのリストも可)
     flag_Maximization_of = config['ABC'].get('maximize', False)
-    if not isinstance(flag_Maximization_of, bool):
-      raise ValueError("[ABC-Borealis] Error: config['ABC']['maximize'] must be True or False.")
-    sign_of = -1.0 if flag_Maximization_of else 1.0
+    if isinstance(flag_Maximization_of, list):
+      if len(flag_Maximization_of) != num_objectives:
+        raise ValueError(f"[ABC-Borealis] Error: ABC.maximize has {len(flag_Maximization_of)} entries, but objectives.num_objectives is {num_objectives}")
+      sign_of = np.array([-1.0 if f else 1.0 for f in flag_Maximization_of])
+    elif isinstance(flag_Maximization_of, bool):
+      sign_of = -1.0 if flag_Maximization_of else 1.0
+    else:
+      raise ValueError("[ABC-Borealis] Error: config['ABC']['maximize'] must be True/False or a list.")
     super().check_maximize_supported(objective_function, flag_Maximization_of, 'ABC', self.mpi_instance)
 
-    # ABC は単目的だけ（既知の問題 12）
-    num_objectives = config.get('objectives', {}).get('num_objectives', 1)
-    if num_objectives != 1:
-      super().stop_program(f'[ABC-Borealis] Error: ABC supports a single objective only (objectives.num_objectives = {num_objectives})', self.mpi_instance)
+    # 多目的のアーカイブと収束判定
+    num_archive        = int( config['ABC'].get('num_archive', 100) )
+    windowsize_archive = int( config['ABC'].get('windowsize_archive', 5) )
+    tolerance_archive  = float( config['ABC'].get('tolerance_archive', 0.0) )
 
     # 目的関数が NaN・無限大を返したときに置き換える値（既知の問題 2）
     value_nonfinite = float( config['parameter_optimized'].get('value_nonfinite', 1.0e+30) )
     def evaluate(x, unique_id, step):
       score = objective_function(self.reshape_array(x, num_dimension), unique_id, step, sign_of)
-      return float( self.sanitize_score(score, 1, value_nonfinite, 'ABC')[0] )
+      return self.sanitize_score(score, num_objectives, value_nonfinite, 'ABC')
+
+    def accept(sol_v, sol_i):
+      # 候補 (値 sol_v) で食料源 (値 sol_i) を置き換えるか
+      if not flag_multi:
+        return self.fitness_value_function(sol_v[0]) > self.fitness_value_function(sol_i[0])
+      if self.dominates(sol_v, sol_i):
+        return True
+      if self.dominates(sol_i, sol_v) or np.array_equal(sol_v, sol_i):
+        return False
+      # 互いに支配しない: 確率 1/2 で置き換える（どちらかに偏らないように）
+      return np.random.rand() < 0.5
+
+    # 多目的: このステップで評価した点 (ID, パラメータ, 値)。ステップの終わりにアーカイブへ入れる
+    step_evaluations = []
+    def record(candidates, results):
+      if flag_multi:
+        for (x, unique_id, step), sol in zip(candidates, results):
+          step_evaluations.append( (int(unique_id), np.array(x, dtype=float), np.array(sol)) )
 
     # 1 プロセスの中で同時に評価する数（スレッド）。外部コード(MPI並列)を呼ぶアダプタ向けで、PSO・GA と同じ仕組み。
     # 候補はどの段でも、乱数を引く順序を変えずにまとめて作ってから評価する。
@@ -169,7 +206,7 @@ class optimizer_abc(orbital):
 
     # データ保持用
     food_source = np.zeros((num_employ_bees, num_dimension))
-    solution = np.zeros(num_employ_bees)
+    solution = np.zeros((num_employ_bees, num_objectives))
     visit_counter = np.zeros(num_employ_bees, dtype=int)
 
     # 履歴用
@@ -186,7 +223,9 @@ class optimizer_abc(orbital):
       unique_id = self.generate_unique_id(0, 0, i+1, rank+1)
       candidates.append( (food_source[i].copy(), unique_id, 0) )
       current_ids[i] = unique_id
-    for i, sol in zip(my_indices, evaluate_batch(candidates)):
+    results = evaluate_batch(candidates)
+    record(candidates, results)
+    for i, sol in zip(my_indices, results):
       solution[i] = sol
 
     # 初期化時の同期
@@ -200,14 +239,23 @@ class optimizer_abc(orbital):
     # solutionは1次元配列なので Allallgather か Allreduce で集約
     #solution = comm.allreduce(solution, op=MPI.SUM)
 
-    best_solution = np.min(solution)
-    best_food_source = food_source[np.argmin(solution)].copy()
-    best_id = int(current_ids[np.argmin(solution)])
+    best_solution = np.min(solution[:, 0])
+    best_food_source = food_source[np.argmin(solution[:, 0])].copy()
+    best_id = int(current_ids[np.argmin(solution[:, 0])])
+
+    # 多目的の外部アーカイブ（全ランクで同じものを持つ）
+    archive_ids = []
+    archive_positions = np.zeros((0, num_dimension))
+    archive_scores = np.zeros((0, num_objectives))
+    archive_id_history = []
+    archive_position_history = []
+    archive_score_history = []
+    archive_centroid_history = []
 
     # History
     best_index_history = np.zeros(num_optiter, dtype=int)
     food_source_history = np.zeros((num_optiter, num_employ_bees, num_dimension))
-    solution_history = np.zeros((num_optiter, num_employ_bees))
+    solution_history = np.zeros((num_optiter, num_employ_bees, num_objectives))
     residaul_mean_history = []
     # それまでの最良の履歴（output_global.dat に書く。以前はそのステップの食料源の中の最良を書いていた。既知の問題 16）
     best_solution_history = np.zeros(num_optiter)
@@ -233,7 +281,7 @@ class optimizer_abc(orbital):
         return v, self.generate_unique_id(n+1, 1, i+1, rank+1)
 
       def employed_update(i, v, unique_id, sol_v):
-        if self.fitness_value_function(sol_v) > self.fitness_value_function(solution[i]):
+        if accept(sol_v, solution[i]):
           food_source[i] = v
           solution[i] = sol_v
           visit_counter[i] = 0
@@ -245,11 +293,15 @@ class optimizer_abc(orbital):
         # 逐次: 先に更新された食料源を後の蜂が参照する（以前と同じ）
         for i in my_indices:
           v, unique_id = employed_candidate(i)
-          employed_update(i, v, unique_id, evaluate(v, unique_id, n))
+          sol_v = evaluate(v, unique_id, n)
+          record( [(v, unique_id, n)], [sol_v] )
+          employed_update(i, v, unique_id, sol_v)
       else:
         # 並列: 段の始まりの食料源から候補をまとめて作り、同時に評価してから順に採否を決める
         candidates = [ (i,) + employed_candidate(i) for i in my_indices ]
-        results = evaluate_batch( [ (v, unique_id, n) for i, v, unique_id in candidates ] )
+        batch = [ (v, unique_id, n) for i, v, unique_id in candidates ]
+        results = evaluate_batch(batch)
+        record(batch, results)
         for (i, v, unique_id), sol_v in zip(candidates, results):
           employed_update(i, v, unique_id, sol_v)
       
@@ -258,7 +310,11 @@ class optimizer_abc(orbital):
         self._sync_all(MPI, rank, size, comm, food_source, solution, visit_counter, current_ids)
 
       # --- 2. Onlooker bee phase ---
-      fitness_values = [self.fitness_value_function(s) for s in solution]
+      if flag_multi:
+        # 非劣解の順位 r（0 が第 1 フロント）から適応度 1/(1+r)
+        fitness_values = [ 1.0/(1.0+r) for r in self.non_dominated_sort(solution) ]
+      else:
+        fitness_values = [self.fitness_value_function(s[0]) for s in solution]
       # 追従蜂も担当を分ける (sizeで割る)
       onlook_base  = num_onlook_bees // size
       onlook_rem   = num_onlook_bees % size
@@ -286,10 +342,12 @@ class optimizer_abc(orbital):
 
         unique_id = self.generate_unique_id(n+1, 2, onlook_offset+m_idx+1, rank+1)
         onlook_candidates.append( (i, v, unique_id) )
-      onlook_results = evaluate_batch( [ (v, unique_id, n) for i, v, unique_id in onlook_candidates ] )
+      onlook_batch = [ (v, unique_id, n) for i, v, unique_id in onlook_candidates ]
+      onlook_results = evaluate_batch(onlook_batch)
+      record(onlook_batch, onlook_results)
       local_onlook_updates = []
       for (i, v, unique_id), sol_v in zip(onlook_candidates, onlook_results):
-        accepted = self.fitness_value_function(sol_v) > self.fitness_value_function(solution[i])
+        accepted = accept(sol_v, solution[i])
         local_onlook_updates.append( (i, accepted, v if accepted else None, sol_v if accepted else None, unique_id) )
 
       if self.mpi_instance.flag_mpi :
@@ -320,7 +378,9 @@ class optimizer_abc(orbital):
           # カウンターリセット
           visit_counter[local_idx] = 0
       # 新しい蜜源の評価
-      scout_results = evaluate_batch( [ (food_source[local_idx].copy(), unique_id, n) for local_idx, unique_id in scout_candidates ] )
+      scout_batch = [ (food_source[local_idx].copy(), unique_id, n) for local_idx, unique_id in scout_candidates ]
+      scout_results = evaluate_batch(scout_batch)
+      record(scout_batch, scout_results)
       for (local_idx, unique_id), sol in zip(scout_candidates, scout_results):
         solution[local_idx] = sol
   
@@ -329,10 +389,10 @@ class optimizer_abc(orbital):
         self._sync_all(MPI, rank, size, comm, food_source, solution, visit_counter, current_ids)
 
       # --- Update Global Best & History ---
-      current_min_idx = np.argmin(solution)
+      current_min_idx = np.argmin(solution[:, 0])
       #print('rank, test-current_min',rank, current_min_idx,solution)
-      if solution[current_min_idx] < best_solution:
-        best_solution = solution[current_min_idx]
+      if solution[current_min_idx, 0] < best_solution:
+        best_solution = solution[current_min_idx, 0]
         best_food_source = food_source[current_min_idx].copy()
         best_id = int(current_ids[current_min_idx])
       best_solution_history[n] = best_solution
@@ -352,26 +412,58 @@ class optimizer_abc(orbital):
       residual_mean = np.mean(residual)
       residaul_mean_history.append(residual_mean)
 
-      if rank == 0:
-        print(f'Step: {n+1}, Best: {best_solution:.5e}, Residual: {self.text_color}{residual_mean:.10e}{self.text_end}')
+      if not flag_multi:
+        if rank == 0:
+          print(f'Step: {n+1}, Best: {best_solution:.5e}, Residual: {self.text_color}{residual_mean:.10e}{self.text_end}')
 
-      # 最初の windowsize_residual ステップは判定しない（1 ステップ目で更新が無いと残差 0 で打ち切られていた。既知の問題 5）
-      if n + 1 > windowsize_residual and residual_mean <= config['ABC']['tolerance']:
+        # 最初の windowsize_residual ステップは判定しない（1 ステップ目で更新が無いと残差 0 で打ち切られていた。既知の問題 5）
+        if n + 1 > windowsize_residual and residual_mean <= config['ABC']['tolerance']:
+          num_optiter = n + 1
+          break
+        continue
+
+      # --- 多目的: このステップで評価したすべての点をアーカイブへ（全ランクで同じ順序で入れる）---
+      if self.mpi_instance.flag_mpi :
+        gathered_evaluations = comm.allgather(step_evaluations)
+      else:
+        gathered_evaluations = [step_evaluations]
+      archive_ids, archive_positions, archive_scores = self.update_pareto_archive(
+        archive_ids, archive_positions, archive_scores, [e for g in gathered_evaluations for e in g], num_archive)
+      step_evaluations.clear()
+      archive_id_history.append( list(archive_ids) )
+      archive_position_history.append( archive_positions.copy() )
+      archive_score_history.append( archive_scores.copy() )
+      archive_centroid_history.append( np.mean(archive_scores, axis=0) )
+
+      # アーカイブの重心が windowsize_archive ステップ前から tolerance_archive 以下しか動かなければ収束
+      # （既定の tolerance_archive = 0 では、アーカイブがそのあいだ変わらなかったときだけ止まる）
+      archive_change = np.inf
+      if len(archive_centroid_history) > windowsize_archive:
+        archive_change = np.linalg.norm( archive_centroid_history[-1] - archive_centroid_history[-1-windowsize_archive] )
+
+      if rank == 0:
+        print(f'Step: {n+1}, Archive size: {len(archive_ids)}, Archive change: {self.text_color}{archive_change:.10e}{self.text_end}, Residual: {residual_mean:.10e}')
+
+      if archive_change <= tolerance_archive:
         num_optiter = n + 1
         break
-      
+
 
     if executor is not None:
       executor.shutdown()
 
     # Output
-    if rank == 0:
+    if rank == 0 and flag_multi:
+      print('[ABC-Borealis] Final Pareto archive:')
+      for unique_id, x, f in zip(archive_ids, archive_positions, archive_scores):
+        print(f'--Pareto ID: {unique_id}, Parameter: {x}, Solution: {f}')
+    elif rank == 0:
       print('Best condition:', best_food_source )
       print('Best value:', best_solution )
       print('Step, Best-condition index, Best condition, Best solution')
       for n in range(0,num_optiter):
         i_opt = best_index_history[n]
-        print(n+1, i_opt+1, id_history[n,i_opt], food_source_history[n,i_opt,:], solution_history[n,i_opt])
+        print(n+1, i_opt+1, id_history[n,i_opt], food_source_history[n,i_opt,:], solution_history[n,i_opt,0])
 
     # Dictionary作成 (Rank 0のみが保存に使う)
     solution_dict = {
@@ -383,10 +475,36 @@ class optimizer_abc(orbital):
             self.str_id_history: id_history[:num_optiter],
             'best_solution': best_solution_history[:num_optiter],
             'best_food_source': best_food_source_history[:num_optiter],
-            'best_id': best_id_history[:num_optiter]
+            'best_id': best_id_history[:num_optiter],
+            self.str_archive_id: archive_id_history,
+            self.str_archive_position: archive_position_history,
+            self.str_archive_score: archive_score_history
         }
 
+    if flag_multi:
+      return archive_positions, archive_scores, solution_dict
     return best_food_source, best_solution, solution_dict
+
+
+  def update_pareto_archive(self, archive_ids, archive_positions, archive_scores, evaluations, num_archive):
+    # アーカイブに新しい評価 (ID, パラメータ, 値) を足し、非劣解だけを残す。同じパラメータの点は 1 つにする。
+    # num_archive を超えたら、混雑距離の最も小さい点を 1 つずつ捨てる（捨てるたびに距離を計算し直す）
+    ids = list(archive_ids)
+    positions = list(archive_positions)
+    scores = list(archive_scores)
+    for unique_id, x, f in evaluations:
+      if any( np.array_equal(x, p) for p in positions ):
+        continue
+      ids.append(unique_id)
+      positions.append(x)
+      scores.append(f)
+    positions = np.array(positions).reshape(len(ids), -1)
+    scores = np.array(scores).reshape(len(ids), -1)
+    keep = np.where( self.non_dominated_mask(scores) )[0]
+    while len(keep) > num_archive:
+      distance = self.crowding_distance( scores[keep], np.zeros(len(keep), dtype=int) )
+      keep = np.delete( keep, np.argmin(distance) )
+    return [ ids[k] for k in keep ], positions[keep], scores[keep]
 
   def _sync_all(self, MPI, rank, size, comm, food_source, solution, visit_counter, current_ids):
     #rank = self.mpi_instance.rank
@@ -435,6 +553,8 @@ class optimizer_abc(orbital):
     num_dimension = self.num_dimension
     # Parameter name list
     solution_name_list = self.parameter_name_list
+    # Number of objectives
+    num_objectives = config.get('objectives', {}).get('num_objectives', 1)
 
     # Variables
     food_source_history   = solution_dict[self.str_food_source]
@@ -453,7 +573,10 @@ class optimizer_abc(orbital):
     for n in range(0,len(solution_name_list)):
       header_tmp = header_tmp + solution_name_list[n] + ','
     # Addition
-    header_tmp = header_tmp + ' ID' + ',' + ' Solution' + ',' + 'Residual_mean' + '\n'
+    if num_objectives == 1:
+      header_tmp = header_tmp + ' ID' + ',' + ' Solution' + ',' + 'Residual_mean' + '\n'
+    else:
+      header_tmp = header_tmp + ' ID,' + ''.join( ' Error_' + str(k+1) + ',' for k in range(num_objectives) ) + ' Residual_mean' + '\n'
     file_output.write( header_tmp )
 
     for n in range(0, num_optiter):
@@ -463,7 +586,10 @@ class optimizer_abc(orbital):
         text_tmp = text_tmp
         for j in range(0,num_dimension):
           text_tmp = text_tmp  + str( food_source_history[n,i,j] ) + ', '
-        text_tmp = text_tmp + str(id_history[n,i]) + ', ' + str(solution_history[n,i]) + ', ' + str(residaul_mean_history[n]) + '\n'
+        text_tmp = text_tmp + str(id_history[n,i]) + ', '
+        for k in range(0, num_objectives):
+          text_tmp = text_tmp + str(solution_history[n,i,k]) + ', '
+        text_tmp = text_tmp + str(residaul_mean_history[n]) + '\n'
       file_output.write( text_tmp )
     file_output.close()
 
@@ -487,6 +613,22 @@ class optimizer_abc(orbital):
 
     # Output results: Global information
     filename_tmp =  config['ABC']['result_dir'] + '/' + config['ABC']['filename_global']
+    num_objectives = config.get('objectives', {}).get('num_objectives', 1)
+    if num_objectives > 1:
+      # 多目的: 各ステップのアーカイブ。PSO・GA の output_global.dat と同じ形
+      print('--Writing Pareto history file...:',filename_tmp)
+      obj_header = ', '.join( f'Objective{k+1}' for k in range(num_objectives) )
+      param_header = ', '.join( f'Parameter{m+1}' for m in range(num_dimension) )
+      with open(filename_tmp, 'w') as file_output:
+        file_output.write(f'Variables = Step, Pareto_ID, {obj_header}, {param_header}\n')
+        for n in range(len(solution_dict[self.str_archive_id])):
+          for unique_id, x, f in zip(solution_dict[self.str_archive_id][n], solution_dict[self.str_archive_position][n], solution_dict[self.str_archive_score][n]):
+            line = f'{n+1}, {unique_id}, ' + ', '.join( str(v) for v in f )
+            for value in x:
+              line += f', {value}'
+            file_output.write(line + '\n')
+      return
+
     print('--Writing best solution file...:',filename_tmp)
 
     file_output = open( filename_tmp , 'w')

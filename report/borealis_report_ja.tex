@@ -25,7 +25,7 @@
 \large 外部の計算コードの入力を探す、逆問題と最適化の枠組み}
 \subtitle{仕組み・手法・並列化・検証}
 \author{高橋裕介}
-\date{2026 年 10 月 20 日 (Borealis version 1.7.0)}
+\date{2026 年 10 月 22 日 (Borealis version 1.7.0 以降の開発版)}
 
 \affiliation{北海道大学}
 \runninghead{Borealis：仕組み・手法・並列化・検証}
@@ -34,7 +34,7 @@
 \begin{document}
 \maketitle
 \begin{borealisabstract}
-Borealis は、外部の計算コード（または簡単な関数）の出力が基準のデータに近づくように、その入力のパラメータを探す Python の枠組みである。最適化の手法（粒子群最適化 PSO、人工蜂コロニー ABC、遺伝的アルゴリズム GA、ベイズ最適化）と、対象とする計算コード（軌道解析の Tacode、熱伝導、SU2 と preCICE による形状最適化など）を「アダプタ」として切り離し、YAML の設定ファイル 1 本で組み合わせを切り替える。PSO・ABC・GA は mpi4py で候補を分担して評価でき、PSO と GA は多目的の最適化もできる。外部コード自体が MPI で並列に走る場合のために、Borealis を 1 プロセスで起動して候補をスレッドで同時に評価する並列評価も入っている。本稿は、このコードが何をどう計算しているか、どう並列化しているか、そして解析解の分かっている問題でどこまで答えに近づくかを述べる。挙げる数値は、断りのない限りリポジトリの検証ケース（\texttt{report/verification/}）と測定（\texttt{report/data/}）が出したもので、図もその出力から作っている。
+Borealis は、外部の計算コード（または簡単な関数）の出力が基準のデータに近づくように、その入力のパラメータを探す Python の枠組みである。最適化の手法（粒子群最適化 PSO、人工蜂コロニー ABC、遺伝的アルゴリズム GA、ベイズ最適化）と、対象とする計算コード（軌道解析の Tacode、熱伝導、SU2 と preCICE による形状最適化など）を「アダプタ」として切り離し、YAML の設定ファイル 1 本で組み合わせを切り替える。PSO・ABC・GA は mpi4py で候補を分担して評価でき、多目的の最適化もできる。PSO の重み係数は、ステップとともに、または探索の成功率に応じて変えることもできる。外部コード自体が MPI で並列に走る場合のために、Borealis を 1 プロセスで起動して候補をスレッドで同時に評価する並列評価も入っている。本稿は、このコードが何をどう計算しているか、どう並列化しているか、そして解析解の分かっている問題でどこまで答えに近づくかを述べる。挙げる数値は、断りのない限りリポジトリの検証ケース（\texttt{report/verification/}）と測定（\texttt{report/data/}）が出したもので、図もその出力から作っている。
 \end{borealisabstract}
 \tableofcontents
 \vspace{1em}
@@ -150,9 +150,21 @@ $p$ は違反の個数にも距離にもよらない定数である（既知の�
   \mathbf{x}_i^{n+1} &= \mathbf{x}_i^{n} + \mathbf{v}_i^{n+1}
 \end{align}
 
-ここで $w$ は \texttt{inertia}、$c_1$ は \texttt{cognitive\_coef}、$c_2$ は \texttt{social\_coef}、$\mathbf{r}_1, \mathbf{r}_2$ は成分ごとに独立な $\mathcal{U}(0,1)$ のベクトル、$\circ$ は成分ごとの積である。位置の切り詰めも、速度の上限も無い。
+ここで $w$ は慣性の重み、$c_1, c_2$ は加速係数で、既定ではそれぞれ \texttt{inertia}・\texttt{cognitive\_coef}・\texttt{social\_coef} の一定の値である（下の「重み係数の決め方」）。$\mathbf{r}_1, \mathbf{r}_2$ は成分ごとに独立な $\mathcal{U}(0,1)$ のベクトル、$\circ$ は成分ごとの積である。位置の切り詰めも、速度の上限も無い。
 
 \textbf{標準の PSO との違い}は、リーダーである。標準の PSO の大域最良は「それまでに見つかった最良の点」だが、Borealis のリーダーは\textbf{そのステップの粒子の中の最良}で、過去のよい点は次のステップで消える（ソースのコメントにある意図した選択。既知の問題 10）。個人の最良は過去を覚えているので、群れが過去の最良を忘れるわけではない。多目的のリーダーを混雑距離で選ぶ関数（\texttt{select\_global\_best\_cd}）も書いてあるが、使っていない。
+
+\paragraph{重み係数の決め方。} \texttt{inertia\_schedule} と \texttt{coefficient\_schedule} で、$w$ と $c_1, c_2$ をステップとともに変えられる。進み具合を $t = n / (N_{\max} - 1)$（$n$ は 0 から、$N_{\max}$ は \texttt{num\_optiter}）とする。収束の判定で早く止まっても、$t$ は $N_{\max}$ を基準にする。
+
+\begin{itemize}
+\item \texttt{inertia\_schedule: constant}（既定）：$w$ = \texttt{inertia} で一定
+\item \texttt{inertia\_schedule: linear}：$w = w_{\max} - (w_{\max} - w_{\min})\,t$ と線形に下げる \cite{shi1999}
+\item \texttt{inertia\_schedule: adaptive}：$w = w_{\min} + (w_{\max} - w_{\min})\,S^n$。$S^n$ はそのステップで個人の最良を更新した粒子の割合で、MPI では全ランクで合計する \cite{nickabadi2011}。探索がうまく進んでいるあいだは $w$ が大きく、停滞すると小さくなる。最初のステップではすべての粒子が更新するので $w = w_{\max}$ である
+\item \texttt{coefficient\_schedule: constant}（既定）：$c_1$ = \texttt{cognitive\_coef}、$c_2$ = \texttt{social\_coef} で一定
+\item \texttt{coefficient\_schedule: linear}：$c_1 = c_1^{\mathrm{i}} + (c_1^{\mathrm{f}} - c_1^{\mathrm{i}})\,t$、$c_2 = c_2^{\mathrm{i}} + (c_2^{\mathrm{f}} - c_2^{\mathrm{i}})\,t$。序盤は自分の最良へ、終盤はリーダーへ強く引く（TVAC \cite{ratnaweera2004}）
+\end{itemize}
+
+$w_{\max}, w_{\min}$ は \texttt{inertia\_max}・\texttt{inertia\_min}（既定 0.9・0.4）、$c_1^{\mathrm{i}}, c_1^{\mathrm{f}}, c_2^{\mathrm{i}}, c_2^{\mathrm{f}}$ は \texttt{cognitive\_coef\_initial}・\texttt{cognitive\_coef\_final}・\texttt{social\_coef\_initial}・\texttt{social\_coef\_final}（既定 2.5・0.5・0.5・2.5）である。既定のままなら、答えはこの機能を入れる前と 1 ビットも違わない。効果は節 \ref{sec:val-schedule} で測った。
 
 \paragraph{収束の判定。} 個人の最良の値の履歴から、各粒子の相対変化を
 
@@ -168,7 +180,7 @@ $p$ は違反の個数にも距離にもよらない定数である（既知の�
 
 \subsection{人工蜂コロニー (ABC)}\label{sec:abc}
 
-\texttt{src/optimizer\_abc/optimizer\_abc.py}。Karaboga の ABC \cite{karaboga2005,karaboga2007} である。単目的だけを扱う（多目的の設定を拒まないのは既知の問題 12）。
+\texttt{src/optimizer\_abc/optimizer\_abc.py}。Karaboga の ABC \cite{karaboga2005,karaboga2007} である。目的が 2 つ以上なら多目的にする（下の「多目的」）。
 
 $N$ 個の食料源 $\mathbf{x}_i$ を範囲の一様乱数から作り、評価する。各ステップは 3 つの段からなる。
 
@@ -191,6 +203,18 @@ $N$ 個の食料源 $\mathbf{x}_i$ を範囲の一様乱数から作り、評価
 \paragraph{偵察蜂。} 訪問の回数が \texttt{visit\_limit}（古い綴り \texttt{vist\_limit} も読む）を\textbf{超えた}食料源は捨て、範囲の一様乱数から作り直して評価する。\textbf{最良の食料源もこの対象になる}。
 
 \paragraph{最良と収束。} ABC は、それまでの最良を食料源とは別に持つ。偵察蜂が最良の食料源を捨てても、それまでの最良は失われない。出力のファイル \texttt{output\_global.dat} には、各ステップの時点でのそれまでの最良を書く（1.6 までは各ステップの食料源の中の最良を書いていて、悪化しえた。既知の問題 16、節 \ref{sec:val-sphere}）。収束は、$W$ を \texttt{windowsize\_residual}（既定 1）として $\mathrm{mean}_i |f_i^n - f_i^{n-W}| / (|f_i^{0}| + 10^{-20}) \le$ \texttt{tolerance} で判定し、最初の $W$ ステップは判定しない。改善の無いステップではこの値が 0 になるので、早く止まりすぎるなら $W$ を大きくする（既知の問題 5）。
+
+\paragraph{多目的。} \texttt{objectives.num\_objectives} が 2 以上なら、次のように変える。支配関係による採否、非劣解の順位、混雑距離によるアーカイブの間引き \cite{deb2002} を組み合わせた単純な形で、文献の特定の多目的 ABC をそのまま実装したものではない。
+
+\begin{itemize}
+\item \textbf{採否}：候補 $\mathbf{v}$ が食料源 $\mathbf{x}_i$ を支配すれば置き換え、$\mathbf{x}_i$ が $\mathbf{v}$ を支配するか値が等しければ置き換えない。互いに支配しなければ確率 1/2 で置き換える（どちらかの目的に偏らないように）。置き換えなければ訪問の回数を 1 足す
+\item \textbf{追従蜂の選択}：食料源の非劣解の順位 $r_i$（0 が第 1 フロント）から、適応度 $1/(1 + r_i)$ でルーレット選択する
+\item \textbf{アーカイブ}：各ステップに評価したすべての点（初期化・雇用蜂・追従蜂・偵察蜂）を外部のアーカイブに足し、互いに支配されない点だけを残す。同じパラメータの点は 1 つにする。\texttt{num\_archive}（既定 100）を超えたら、混雑距離の最も小さい点を 1 つずつ捨てる（捨てるたびに距離を計算し直す）。MPI では各ランクの評価を \texttt{allgather} で集め、全ランクが同じ順序で入れる。PSO と違い、\textbf{全ステップの評価から作る}ので、最終のアーカイブはそれまでの Pareto フロントの近似である
+\item \textbf{収束}：アーカイブの値の重心 $\bar{\mathbf{f}}^n$ の、$W_a$ ステップ前からの変化 $\|\bar{\mathbf{f}}^n - \bar{\mathbf{f}}^{n-W_a}\|$ が \texttt{tolerance\_archive}（既定 0）以下なら止める。$W_a$ は \texttt{windowsize\_archive}（既定 5）。既定では、アーカイブが $W_a$ ステップのあいだ変わらなかったときだけ止まる。単目的の \texttt{tolerance} は使わない
+\item \textbf{最大化と出力}：\texttt{maximize} は目的ごとのリストでもよい。\texttt{output\_global.dat} には各ステップのアーカイブを PSO・GA と同じ形で書く
+\end{itemize}
+
+単目的の動作は、多目的を入れる前と同じである（同じ種で 1 ビットも違わない答えになることを確かめた）。
 
 \paragraph{評価の回数。} 1 ステップに $N + M$ 回と、偵察蜂の数である。評価の番号は $10000 \times$ステップ $+ 1000 \times$段 $+$ 蜂の番号 で作るので、$N$ や $M$ が 1000 以上だと番号が重なる。
 
@@ -240,7 +264,7 @@ $N$ 個の食料源 $\mathbf{x}_i$ を範囲の一様乱数から作り、評価
 
 \begin{itemize}
 \item \textbf{PSO}：粒子を \texttt{np.array\_split} で均等に連続に切り分ける（1.6 までは余りを最後のランクに載せていた。既知の問題 9）。各ランクは自分の粒子だけを評価し、ステップの終わりに位置・値・番号を rank 0 に集め（\texttt{gather}）、rank 0 がアーカイブとリーダーを作って全ランクに配る（\texttt{bcast}）。速度の更新は各ランクで自分の粒子について行う。履歴は最後に \texttt{allreduce} で合わせる
-\item \textbf{ABC}：雇用蜂は \texttt{np.array\_split} で均等に分け、段の終わりに \texttt{Allreduce} で全ランクの食料源をそろえる。追従蜂は全食料源から選ぶので、自分の担当の外を更新しうる。そこで追従蜂の更新は \texttt{allgather} で集め、全ランクが同じ順序で適用する（担当の範囲だけを集めていた頃は、担当の外の更新が消えていた。既知の問題 25）
+\item \textbf{ABC}：雇用蜂は \texttt{np.array\_split} で均等に分け、段の終わりに \texttt{Allreduce} で全ランクの食料源をそろえる。追従蜂は全食料源から選ぶので、自分の担当の外を更新しうる。そこで追従蜂の更新は \texttt{allgather} で集め、全ランクが同じ順序で適用する（担当の範囲だけを集めていた頃は、担当の外の更新が消えていた。既知の問題 25）。多目的では、ステップの終わりに各ランクが評価した点を \texttt{allgather} で集め、全ランクが同じアーカイブを作る
 \end{itemize}
 
 \begin{itemize}
@@ -274,7 +298,7 @@ $N$ 個の食料源 $\mathbf{x}_i$ を範囲の一様乱数から作り、評価
 \toprule
 \texttt{kind\_adapter} & 中身 \\
 \midrule
-\texttt{simple\_function} & 解析的な目的関数（ずらした球関数 $f_k(\mathbf{x}) = |\mathbf{x} - 2(k-1)\mathbf{1}|^2$）。外部コードは要らない。検証に使う \\
+\texttt{simple\_function} & 解析的な目的関数（ずらした球関数 $f_k(\mathbf{x}) = |\mathbf{x} - 2(k-1)\mathbf{1}|^2$。\texttt{function\_type: rastrigin} で、同じ位置に最小を持つ Rastrigin 関数）。外部コードは要らない。検証に使う \\
 \texttt{example\_externalcode} & 外部コードを呼ぶ雛形。曲線の当てはめ \\
 \texttt{tacode} & 軌道解析コード Tacode（Python 版と Fortran 版）。軌道の観測から大気の密度を推定する \cite{takahashi2022,sakai2024} \\
 \texttt{heatcond} & 熱伝導の解析。表面の温度の履歴から熱流束を推定する \\
@@ -296,7 +320,7 @@ $N$ 個の食料源 $\mathbf{x}_i$ を範囲の一様乱数から作り、評価
 
 \begin{itemize}
 \item \texttt{filename\_output}（PSO・ABC・GA）：すべての候補の、各ステップの位置（PSO は速度も、GA は非劣解の順位も）、番号、誤差、残差。ステップ（世代）ごとに Tecplot のゾーンを 1 つ書く
-\item \texttt{filename\_global}（PSO・ABC・GA）：各ステップのアーカイブ（PSO）、それまでの最良（ABC）、第 1 フロント（GA。単目的では最良）の番号・値・位置。PSO の多目的では、最終のステップの行が最終のアーカイブで、\textbf{全履歴の Pareto フロントではない}（既知の問題 10）
+\item \texttt{filename\_global}（PSO・ABC・GA）：各ステップのアーカイブ（PSO、多目的の ABC）、それまでの最良（単目的の ABC）、第 1 フロント（GA。単目的では最良）の番号・値・位置。PSO の多目的では、最終のステップの行が最終のアーカイブで、\textbf{全履歴の Pareto フロントではない}（既知の問題 10）。多目的の ABC のアーカイブは全ステップの評価から作る
 \item \texttt{filename\_output}（ベイズ最適化）：評価した順の点・値・番号
 \end{itemize}
 
@@ -338,7 +362,7 @@ $f_1 = |\mathbf{x}|^2$、$f_2 = |\mathbf{x} - \mathbf{c}|^2$、$\mathbf{c} = 2\c
 \begin{figure}[h]
 \centering
 \includegraphics[width=0.95\linewidth]{pareto.png}
-\caption{2 目的の PSO と GA。左：目的の空間での PSO のアーカイブ、GA の最終世代の第 1 フロント、厳密な Pareto フロント。右：Pareto 集合からの外れ $\delta$（PSO はアーカイブの最大と平均、GA はフロントの平均）と、PSO のアーカイブの大きさ（点線）。}
+\caption{2 目的の PSO・GA・ABC。左：目的の空間での PSO のアーカイブ、GA の最終世代の第 1 フロント、ABC の最終ステップのアーカイブ、厳密な Pareto フロント。右：Pareto 集合からの外れ $\delta$（PSO はアーカイブの最大と平均、GA はフロントの平均、ABC はアーカイブの平均）と、PSO のアーカイブの大きさ（点線）。}
 \label{fig:pareto}
 \end{figure}
 
@@ -346,19 +370,69 @@ $f_1 = |\mathbf{x}|^2$、$f_2 = |\mathbf{x} - \mathbf{c}|^2$、$\mathbf{c} = 2\c
 
 同じ問題を GA（40 個体、100 世代。NSGA-II の世代交代）で解くと、最終世代の第 1 フロントは 40 点すべてで、$f_1$ が 0.05〜20.0 と\textbf{フロントの両端まで均等に覆った}（図 \ref{fig:pareto} の四角）。$\delta$ の平均は 0.084、最大は 0.21 で、PSO より平均はわずかに大きいが最大は小さい。$\delta$ の平均は、20 世代目に 0.29、60 世代目に 0.10 と、最後まで下がり続ける（PSO のように頭打ちにならない）。GA は親と子を合わせて残すので、よい点が世代をまたいで残り、混雑距離で選ぶので点がフロントに広がる。多目的では、フロントの全体を得たいなら GA、とくに $f_1$ の小さい側・大きい側の端が要るときは GA を使うのがよい。
 
+多目的の ABC（雇用蜂・追従蜂とも 20 匹、\texttt{visit\_limit} = 10、\texttt{num\_archive} = 40、100 ステップ。\texttt{report/verification/abc\_pareto}）では、最終のアーカイブは 40 点で、$f_1$ が 0.15〜17.4 とフロントのほぼ全体を覆った（図 \ref{fig:pareto} の三角）。$\delta$ の平均は 0.18、最大は 0.45 で、GA（0.084・0.21）より大きい。$\delta$ の平均は、20 ステップ目に 1.49、40 ステップ目に 0.52、60 ステップ目に 0.26 と、最後まで下がり続けるが、GA より遅い。1 ステップの評価の回数は約 40 回（雇用蜂 20 + 追従蜂 20 + 偵察蜂）で、GA の 1 世代（40 回）とほぼ同じである。ABC の近傍の探索は 1 回に 1 つの次元しか動かさないので、5 次元の線分（Pareto 集合）に沿って点を詰めるのが遅いと見ている。この問題では、多目的は GA を先に試すのがよい。
+
+\subsection{PSO の重み係数}\label{sec:val-schedule}
+
+節 \ref{sec:pso} の重み係数の決め方を、局所解の多い Rastrigin 関数
+
+\begin{equation}
+  f(\mathbf{x}) = \sum_{i=1}^{d} \left[ x_i^2 - 10 \cos(2\pi x_i) + 10 \right]
+\end{equation}
+
+と球関数で比べた。Rastrigin 関数の最小は原点の $f = 0$ で、整数の格子点の近くに局所解があり、原点の隣の局所解で $f \approx 1$ である。5 次元、範囲は Rastrigin が $[-5.12, 5.12]$、球関数が $[-10, 10]$ で、20 粒子・200 ステップ（収束の判定で止めない）を、設定ごとに乱数の種を 30 通り変えて走らせた（\texttt{report/run\_pso\_schedule.py}、約 25 秒）。比べたのは表 \ref{tab:schedule} の 7 つの設定である。$w = 0.73$、$c = 1.5$ は Clerc と Kennedy の縮約係数と等価な値 \cite{clerc2002}、$w = 0.45$、$c = 1.5$ は、$c = 1.5$ で $w$ を 0.45・0.5・0.55・0.6 と振ったうちで Rastrigin に最もよかった値（対照）である。
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabularx}{\linewidth}{Xrrr}
+\toprule
+設定 & Rastrigin の中央値 & Rastrigin で $f < 1$ & 球関数の中央値 \\
+\midrule
+一定 $w = 0.5$、$c_1 = c_2 = 1.0$（検証の既定） & 4.97 & 1/30 & $2.9 \times 10^{-42}$ \\
+一定 $w = 0.73$、$c_1 = c_2 = 1.5$ & 15.2 & 0/30 & $4.0 \times 10^{-8}$ \\
+一定 $w = 0.45$、$c_1 = c_2 = 1.5$（対照） & 1.99 & 13/30 & $3.8 \times 10^{-35}$ \\
+linear $w$、$c_1 = c_2 = 1.5$ & 6.16 & 3/30 & $1.3 \times 10^{-15}$ \\
+adaptive $w$、$c_1 = c_2 = 1.5$ & 0.995 & 17/30 & $2.5 \times 10^{-21}$ \\
+linear $w$、TVAC & 11.3 & 0/30 & $2.2 \times 10^{-13}$ \\
+adaptive $w$、TVAC & 0.995 & 20/30 & $7.2 \times 10^{-21}$ \\
+\bottomrule
+\end{tabularx}
+\caption{PSO の重み係数の決め方。200 ステップ後のそれまでの最良の、30 回の中央値と、Rastrigin で $f < 1$（原点の谷に入った）になった回数。linear と adaptive の $w$ は 0.9 と 0.4 のあいだ。}
+\label{tab:schedule}
+\end{table}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.98\linewidth]{pso_schedule.png}
+\caption{PSO の重み係数の決め方。左：Rastrigin、中：球関数の、それまでの最良（30 回の中央値）。右：Rastrigin での慣性の重み $w$（30 回の中央値）。}
+\label{fig:schedule}
+\end{figure}
+
+表 \ref{tab:schedule} と図 \ref{fig:schedule} に結果を示す。
+
+\begin{itemize}
+\item Rastrigin では、adaptive の $w$（TVAC の有無によらず）が中央値 0.995（原点の隣の局所解）まで進み、30 回のうち 17 回・20 回で原点の谷に入った。検証の既定の設定は、53 ステップ目に 4.97 の局所解に止まり、そのあとは動かない
+\item ただし、\textbf{改善の大部分は $c$ を 1.0 から 1.5 にしたことによる}。$c = 1.5$ で $w$ を 0.45 に固定した対照は、中央値 1.99、13 回だった。adaptive と対照の差は、30 回では有意でない（片側の Mann--Whitney 検定で $p = 0.19$）。adaptive の $w$ は 7 ステップほどで 0.9 から 0.5 まで下がり、そのあとは 0.43〜0.58 のあいだにとどまった（図 \ref{fig:schedule} の右）。つまり adaptive は、振って探した対照の $w$ に、\textbf{自分で近づいた}。adaptive の利点は、$w$ を振って探さずに、振って探した値と同じ程度の結果が得られることにある
+\item linear の $w$ と、linear の $w$ に TVAC を組み合わせたものは、この問題では検証の既定よりも対照よりも悪かった。linear の $w$ では、中央値は $w$ が 0.65 になる 100 ステップ目まで 20 より下がらず、そこから $w$ が下がるにつれて 200 ステップ目の 6.2 まで進む。この PSO は速度に上限が無く、リーダーがそのステップの最良である（既知の問題 10、21）ので、$w$ が大きいあいだは群れが落ち着かないと見ている。文献の linear の $w$ は、速度の上限と組み合わせて使われることが多い
+\item 球関数では、検証の既定（$w = 0.5$、$c = 1.0$）が最も速い。谷が 1 つなら、群れを早く絞るほうが速い。adaptive も 30 回すべてが $10^{-20}$ 程度まで収束した
+\end{itemize}
+
+既定は一定の値のままにした（既存の設定の答えを変えないため）。局所解が疑われる問題では、まず \texttt{inertia\_schedule: adaptive} と $c_1 = c_2 = 1.5$ を試すのがよい。谷が 1 つと分かっている問題では、一定の $w = 0.5$、$c = 1.0$ のほうが速い。ここで比べたのは 5 次元の 2 つの関数だけで、ほかの問題での優劣は保証しない。
+
 \subsection{再現性}
 
-同じ種で 2 回走らせると、PSO・ABC・GA の 5 つのケースの \texttt{output\_global.dat} はすべて 1 ビットも違わずに一致した。逐次の実行では、Borealis の答えは種だけで決まる。PSO と GA の並列評価（\texttt{num\_parallel}）でも、乱数はスレッドの外で引くので、逐次と同じ答えになる。ABC の並列評価は雇用蜂の段だけ逐次と答えが変わるが、並列の数にはよらない（どちらもテストで確かめている）。MPI で走らせると、各ランクの乱数の列が別になり、プロセス数を変えたときの再現性は無い。
+同じ種で 2 回走らせると、PSO・ABC・GA の 6 つのケースの \texttt{output\_global.dat} はすべて 1 ビットも違わずに一致した。逐次の実行では、Borealis の答えは種だけで決まる。PSO と GA の並列評価（\texttt{num\_parallel}）でも、乱数はスレッドの外で引くので、逐次と同じ答えになる。ABC の並列評価は雇用蜂の段だけ逐次と答えが変わるが、並列の数にはよらない（どちらもテストで確かめている）。MPI で走らせると、各ランクの乱数の列が別になり、プロセス数を変えたときの再現性は無い。
 
 \subsection{テストと CI}\label{sec:tests}
 
-\texttt{tests/} に pytest のテストがあり、\texttt{python3 -m pytest tests} で走る（手元で 42 件、約 27 秒。ベイズ最適化の 3 件は bayesian-optimization が無ければ飛ばす）。中身は次のとおりである。
+\texttt{tests/} に pytest のテストがあり、\texttt{python3 -m pytest tests} で走る（手元で 49 件、約 30 秒。ベイズ最適化の 3 件は bayesian-optimization が無ければ飛ばす）。中身は次のとおりである。
 
 \begin{itemize}
 \item \texttt{orbital} の道具：時刻の単位、既定のパス、対応点の探索（以前のループと同じ点を返すことの照合と、範囲の外の扱い）、測地座標の往復、目的関数の値の検査、外部コードの起動（終了ステータス、古い結果のファイル、MPI の環境変数が子に漏れないこと）
 \item 設定の検査：知らないキー・古い名前の警告と、同梱のすべての \texttt{borealis.yml} に知らないキーが無いこと
-\item 手法を通しで：PSO の収束と再現性、並列評価が逐次と同じ答えになること、最大化の符号、2 目的の Pareto 集合への接近、ABC のそれまでの最良が単調なこと、多目的を拒むこと、GA の交叉と突然変異が範囲に収まること・非劣解ソート・最良の単調性・再現性・並列評価・2 目的でフロントを覆うこと、ベイズ最適化の収束・再現性・最大化・使えないモデルを拒むこと
-\item MPI：PSO・ABC・GA を 13 個の候補・3 プロセスで（\texttt{mpirun} がある環境だけ）
+\item 手法を通しで：PSO の収束と再現性、並列評価が逐次と同じ答えになること、最大化の符号、2 目的の Pareto 集合への接近、ABC のそれまでの最良が単調なこと、ABC の 2 目的（アーカイブの点が互いに支配しないこと・大きさの上限・Pareto 集合への接近・再現性・並列評価と目的ごとの最大化）、PSO の重み係数の決め方（linear の値、adaptive の範囲と収束、誤った名前で止まること）、Rastrigin 関数の値、GA の交叉と突然変異が範囲に収まること・非劣解ソート・最良の単調性・再現性・並列評価・2 目的でフロントを覆うこと、ベイズ最適化の収束・再現性・最大化・使えないモデルを拒むこと
+\item MPI：PSO・ABC・GA を 13 個の候補・3 プロセスで、ABC は 2 目的でも（\texttt{mpirun} がある環境だけ）
 \item \texttt{shapeoptimizer}：MPI を使わないダミーの外部コードで、並列評価・単目的と 2 目的・コアの割り当て・失敗のときのペナルティ
 \end{itemize}
 
@@ -451,6 +525,10 @@ SU2 + preCICE & 12 & 9.3〜10.9 & 46.8 & 120.7 & 2.6 倍 \\
 \begin{thebibliography}{99}
 \bibitem{kennedy1995} J. Kennedy and R. Eberhart, ``Particle swarm optimization,'' \textit{Proc. ICNN'95}, vol.~4, pp.~1942--1948, 1995.
 \bibitem{shi1998} Y. Shi and R. Eberhart, ``A modified particle swarm optimizer,'' \textit{Proc. IEEE ICEC}, pp.~69--73, 1998.
+\bibitem{shi1999} Y. Shi and R. C. Eberhart, ``Empirical study of particle swarm optimization,'' \textit{Proc. CEC 1999}, vol.~3, pp.~1945--1950, 1999.
+\bibitem{nickabadi2011} A. Nickabadi, M. M. Ebadzadeh, and R. Safabakhsh, ``A novel particle swarm optimization algorithm with adaptive inertia weight,'' \textit{Applied Soft Computing}, vol.~11, no.~4, pp.~3658--3670, 2011.
+\bibitem{ratnaweera2004} A. Ratnaweera, S. K. Halgamuge, and H. C. Watson, ``Self-organizing hierarchical particle swarm optimizer with time-varying acceleration coefficients,'' \textit{IEEE Trans. Evol. Comput.}, vol.~8, no.~3, pp.~240--255, 2004.
+\bibitem{clerc2002} M. Clerc and J. Kennedy, ``The particle swarm -- explosion, stability, and convergence in a multidimensional complex space,'' \textit{IEEE Trans. Evol. Comput.}, vol.~6, no.~1, pp.~58--73, 2002.
 \bibitem{coello2004} C. A. Coello Coello, G. T. Pulido, and M. S. Lechuga, ``Handling multiple objectives with particle swarm optimization,'' \textit{IEEE Trans. Evol. Comput.}, vol.~8, no.~3, pp.~256--279, 2004.
 \bibitem{karaboga2005} D. Karaboga, ``An idea based on honey bee swarm for numerical optimization,'' Technical Report TR06, Erciyes University, 2005.
 \bibitem{karaboga2007} D. Karaboga and B. Basturk, ``A powerful and efficient algorithm for numerical function optimization: artificial bee colony (ABC) algorithm,'' \textit{J. Global Optim.}, vol.~39, pp.~459--471, 2007.

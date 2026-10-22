@@ -364,6 +364,70 @@ class orbital(general):
     return score
 
 
+  # 多目的の道具（GA・ABC で共有する。目的関数はすべて最小化の向き）
+  def dominates(self, a, b):
+    return np.all(a <= b) and np.any(a < b)
+
+
+  def non_dominated_sort(self, scores):
+    # 非劣解の順位（0 が第 1 フロント）。高速な非劣解ソート (Deb et al., 2002)
+    num = len(scores)
+    dominated_by = [ [] for _ in range(num) ]
+    count_dominating = np.zeros(num, dtype=int)
+    rank = np.zeros(num, dtype=int)
+    front = []
+    for p in range(num):
+      for q in range(num):
+        if p == q:
+          continue
+        if self.dominates(scores[p], scores[q]):
+          dominated_by[p].append(q)
+        elif self.dominates(scores[q], scores[p]):
+          count_dominating[p] += 1
+      if count_dominating[p] == 0:
+        front.append(p)
+    level = 0
+    while front:
+      next_front = []
+      for p in front:
+        rank[p] = level
+        for q in dominated_by[p]:
+          count_dominating[q] -= 1
+          if count_dominating[q] == 0:
+            next_front.append(q)
+      level += 1
+      front = next_front
+    return rank
+
+
+  def non_dominated_mask(self, scores):
+    # 第 1 フロント（どれにも支配されない点）なら True。non_dominated_sort の順位 0 と同じものを、配列の演算で求める
+    scores = np.asarray(scores, dtype=float)
+    less_equal = np.all( scores[:, None, :] <= scores[None, :, :], axis=2 )   # [j, i]: j がすべての目的で i 以下
+    less       = np.any( scores[:, None, :] <  scores[None, :, :], axis=2 )   # [j, i]: j がどれかの目的で i より小さい
+    return ~np.any( less_equal & less, axis=0 )
+
+
+  def crowding_distance(self, scores, rank):
+    # 同じフロントの中での混雑距離。端の個体は無限大
+    scores = np.asarray(scores)
+    distance = np.zeros(len(scores))
+    for level in np.unique(rank):
+      index = np.where(rank == level)[0]
+      if len(index) <= 2:
+        distance[index] = np.inf
+        continue
+      for m in range(scores.shape[1]):
+        order = index[ np.argsort(scores[index, m], kind='stable') ]
+        distance[order[0]] = np.inf
+        distance[order[-1]] = np.inf
+        f_range = scores[order[-1], m] - scores[order[0], m]
+        if f_range < 1.0e-15:
+          continue
+        distance[order[1:-1]] += (scores[order[2:], m] - scores[order[:-2], m]) / f_range
+    return distance
+
+
   # Decorator for time measurement
   def time_measurement_decorated(func):
     @wraps(func)

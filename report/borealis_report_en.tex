@@ -15,7 +15,7 @@
 \large A framework for inverse problems and optimization that searches the inputs of external codes}
 \subtitle{Design, methods, parallelization and verification}
 \author{Yusuke Takahashi}
-\date{20 October 2026 (Borealis version 1.7.0)}
+\date{22 October 2026 (Borealis, development version after 1.7.0)}
 
 \affiliation{Hokkaido University}
 \runninghead{Borealis: design, methods, parallelization and verification}
@@ -23,7 +23,7 @@
 \begin{document}
 \maketitle
 \begin{borealisabstract}
-Borealis is a Python framework that searches the input parameters of an external computer code (or of a simple function) so that its output comes close to reference data. The optimization methods (particle swarm optimization, PSO; artificial bee colony, ABC; genetic algorithm, GA; Bayesian optimization) and the codes being driven (the trajectory code Tacode, heat conduction, shape optimization with SU2 and preCICE, and others) are kept apart as ``adapters'', and one YAML configuration file selects the combination. PSO, ABC and GA can share the evaluations among processes with mpi4py, and PSO and GA also optimize several objectives. For external codes that themselves run under MPI, Borealis can also run as a single process and evaluate the candidates concurrently in threads. This report describes what the code computes and how, how it is parallelized, and how close it gets to the answer on problems whose solution is known. Unless stated otherwise, the numbers come from the verification cases (\texttt{report/verification/}) and the measurements (\texttt{report/data/}) of the repository, and the figures are made from their output.
+Borealis is a Python framework that searches the input parameters of an external computer code (or of a simple function) so that its output comes close to reference data. The optimization methods (particle swarm optimization, PSO; artificial bee colony, ABC; genetic algorithm, GA; Bayesian optimization) and the codes being driven (the trajectory code Tacode, heat conduction, shape optimization with SU2 and preCICE, and others) are kept apart as ``adapters'', and one YAML configuration file selects the combination. PSO, ABC and GA can share the evaluations among processes with mpi4py, and all three also optimize several objectives. The weight coefficients of PSO can change with the step or with the success rate of the search. For external codes that themselves run under MPI, Borealis can also run as a single process and evaluate the candidates concurrently in threads. This report describes what the code computes and how, how it is parallelized, and how close it gets to the answer on problems whose solution is known. Unless stated otherwise, the numbers come from the verification cases (\texttt{report/verification/}) and the measurements (\texttt{report/data/}) of the repository, and the figures are made from their output.
 \end{borealisabstract}
 \tableofcontents
 \vspace{1em}
@@ -139,9 +139,23 @@ Below, $N$ is the number of candidates (particles, employed bees), $d$ the dimen
   \mathbf{x}_i^{n+1} &= \mathbf{x}_i^{n} + \mathbf{v}_i^{n+1}
 \end{align}
 
-Here $w$ is \texttt{inertia}, $c_1$ \texttt{cognitive\_coef}, $c_2$ \texttt{social\_coef}, $\mathbf{r}_1, \mathbf{r}_2$ vectors of independent $\mathcal{U}(0,1)$ components and $\circ$ the componentwise product. Neither the positions are clipped nor the velocities limited.
+Here $w$ is the inertia weight and $c_1, c_2$ the acceleration coefficients, by default the constants \texttt{inertia}, \texttt{cognitive\_coef} and \texttt{social\_coef} (see ``Weight coefficients'' below); $\mathbf{r}_1, \mathbf{r}_2$ are vectors of independent $\mathcal{U}(0,1)$ components and $\circ$ the componentwise product. Neither the positions are clipped nor the velocities limited.
 
 \textbf{What differs from the standard PSO} is the leader. In the standard PSO the global best is the best point found so far; in Borealis the leader is \textbf{the best of the particles of the current step}, and good points of the past are lost at the next step (a deliberate choice according to the comment in the source; known issue 10). The personal bests remember the past, so the swarm does not forget the best point altogether. A function that chooses the leader of several objectives by crowding distance (\texttt{select\_global\_best\_cd}) is written but not used.
+
+\paragraph{Weight coefficients.} \texttt{inertia\_schedule} and \texttt{coefficient\_schedule} let $w$ and $c_1, c_2$ change with the step. Let the progress be $t = n / (N_{\max} - 1)$ ($n$ from 0, $N_{\max}$ = \texttt{num\_optiter}). $t$ refers to $N_{\max}$ even when the convergence criterion stops the run earlier.
+
+\begin{itemize}
+\item \texttt{inertia\_schedule: constant} (default): $w$ = \texttt{inertia}, constant
+\item \texttt{inertia\_schedule: linear}: $w = w_{\max} - (w_{\max} - w_{\min})\,t$, decreasing linearly \cite{shi1999}
+\item \texttt{inertia\_schedule: adaptive}: $w = w_{\min} + (w_{\max} - w_{\min})\,S^n$, where $S^n$ is the fraction of particles that improved their personal best in that step, summed over all ranks under MPI \cite{nickabadi2011}. $w$ is large while the search goes well and small when it stalls. At the first step every particle improves, so $w = w_{\max}$
+\item \texttt{coefficient\_schedule: constant} (default): $c_1$ = \texttt{cognitive\_coef} and $c_2$ = \texttt{social\_coef}, constant
+\item \texttt{coefficient\_schedule: linear}: $c_1 = c_1^{\mathrm{i}} + (c_1^{\mathrm{f}} - c_1^{\mathrm{i}})\,t$ and $c_2 = c_2^{\mathrm{i}} + (c_2^{\mathrm{f}} - c_2^{\mathrm{i}})\,t$: early on the pull is towards the particle's own best, late towards the leader (TVAC \cite{ratnaweera2004})
+\end{itemize}
+
+\begin{sloppypar}
+$w_{\max}, w_{\min}$ are \texttt{inertia\_max} and \texttt{inertia\_min} (defaults 0.9 and 0.4), and $c_1^{\mathrm{i}}, c_1^{\mathrm{f}}, c_2^{\mathrm{i}}, c_2^{\mathrm{f}}$ are \texttt{cognitive\_coef\_initial}, \texttt{cognitive\_coef\_final}, \texttt{social\_coef\_initial} and \texttt{social\_coef\_final} (defaults 2.5, 0.5, 0.5 and 2.5). With the defaults the answer is bit for bit the same as before this feature. The effect is measured in Section~\ref{sec:val-schedule}.
+\end{sloppypar}
 
 \paragraph{Convergence.} From the history of the personal best values, the relative change of each particle is
 
@@ -157,7 +171,7 @@ For several objectives, the stagnation of the archive is required as well. With 
 
 \subsection{Artificial bee colony (ABC)}\label{sec:abc}
 
-\texttt{src/optimizer\_abc/optimizer\_abc.py}. The ABC of Karaboga \cite{karaboga2005,karaboga2007}, for one objective only (that it accepts a setting with several objectives is known issue 12).
+\texttt{src/optimizer\_abc/optimizer\_abc.py}. The ABC of Karaboga \cite{karaboga2005,karaboga2007}; with two or more objectives it becomes multi-objective (see ``Several objectives'' below).
 
 $N$ food sources $\mathbf{x}_i$ are drawn uniformly within the bounds and evaluated. Each step has three phases.
 
@@ -180,6 +194,18 @@ improves, $\mathbf{x}_i$ is replaced by $\mathbf{v}$ and its visit counter reset
 \paragraph{Scout bees.} A food source whose visit counter \textbf{exceeds} \texttt{visit\_limit} (the old spelling \texttt{vist\_limit} is still read) is abandoned, drawn again uniformly within the bounds and evaluated. \textbf{The best food source is not exempt.}
 
 \paragraph{Best and convergence.} ABC keeps the best solution found so far apart from the food sources, so it is not lost when a scout abandons the best source. The output file \texttt{output\_global.dat} holds the best so far at each step (up to 1.6 it held the best of the food sources at each step, which could get worse; known issue 16, Section~\ref{sec:val-sphere}). With $W$ = \texttt{windowsize\_residual} (default 1), convergence is $\mathrm{mean}_i |f_i^n - f_i^{n-W}| / (|f_i^{0}| + 10^{-20}) \le$ \texttt{tolerance}, not checked during the first $W$ steps. A step without any improvement makes this 0, so if the run stops too early, increase $W$ (known issue 5).
+
+\paragraph{Several objectives.} When \texttt{objectives.num\_objectives} is 2 or more, the following changes. It is a simple combination of acceptance by dominance, non-dominated ranks and the thinning of an archive by crowding distance \cite{deb2002}, not a direct implementation of a particular multi-objective ABC from the literature.
+
+\begin{itemize}
+\item \textbf{Acceptance}: the candidate $\mathbf{v}$ replaces the food source $\mathbf{x}_i$ if it dominates it, and does not if $\mathbf{x}_i$ dominates $\mathbf{v}$ or their values are equal. If neither dominates, it replaces it with probability 1/2 (so as not to favour either objective). If it does not replace it, the visit count increases by 1
+\item \textbf{Choice of the onlookers}: roulette selection with the fitness $1/(1 + r_i)$, where $r_i$ is the non-dominated rank of the food source (0 for the first front)
+\item \textbf{Archive}: every point evaluated in a step (initialization, employed, onlooker and scout bees) is added to an external archive, and only the mutually non-dominated points are kept; points with the same parameters are kept once. Beyond \texttt{num\_archive} (default 100) points, the point with the smallest crowding distance is dropped one at a time (the distances are recomputed after each drop). Under MPI the evaluations of all ranks are collected with \texttt{allgather} and added by every rank in the same order. Unlike PSO, the archive is \textbf{built from the evaluations of all steps}, so the final archive approximates the Pareto front found so far
+\item \textbf{Convergence}: the run stops when the centroid $\bar{\mathbf{f}}^n$ of the values in the archive has moved by $\|\bar{\mathbf{f}}^n - \bar{\mathbf{f}}^{n-W_a}\| \le$ \texttt{tolerance\_archive} (default 0) since $W_a$ steps before, $W_a$ being \texttt{windowsize\_archive} (default 5). With the defaults the run stops only when the archive has not changed for $W_a$ steps. The single-objective \texttt{tolerance} is not used
+\item \textbf{Maximization and output}: \texttt{maximize} may be a list, one entry per objective. \texttt{output\_global.dat} holds the archive of every step, in the same form as PSO and GA
+\end{itemize}
+
+The single-objective behaviour is unchanged (we checked that the same seed gives the same answer bit for bit as before).
 
 \paragraph{Number of evaluations.} $N + M$ per step, plus the number of scouts. The evaluation number is $10000 \times \text{step} + 1000 \times \text{phase} + \text{bee number}$, so the numbers collide when $N$ or $M$ reaches 1000.
 
@@ -229,7 +255,7 @@ Started as \texttt{mpirun -n P python3 borealis.py}, PSO, ABC and GA divide the 
 
 \begin{itemize}
 \item \textbf{PSO}: the particles are cut evenly into contiguous blocks with \texttt{np.array\_split} (up to 1.6 the remainder went to the last rank; known issue 9). Each rank evaluates its own particles; at the end of the step the positions, values and numbers are gathered to rank 0 (\texttt{gather}), which builds the archive and the leader and sends them to all ranks (\texttt{bcast}). Each rank updates the velocities of its own particles. The histories are combined with \texttt{allreduce} at the end
-\item \textbf{ABC}: the employed bees are divided evenly with \texttt{np.array\_split}, and the food sources of all ranks are made equal with \texttt{Allreduce} at the end of each phase. The onlookers choose among all food sources and can update one outside their own block, so their updates are collected with \texttt{allgather} and applied by all ranks in the same order (when only the own block was collected, updates outside it were lost; known issue 25)
+\item \textbf{ABC}: the employed bees are divided evenly with \texttt{np.array\_split}, and the food sources of all ranks are made equal with \texttt{Allreduce} at the end of each phase. The onlookers choose among all food sources and can update one outside their own block, so their updates are collected with \texttt{allgather} and applied by all ranks in the same order (when only the own block was collected, updates outside it were lost; known issue 25). With several objectives, the points evaluated by each rank are collected with \texttt{allgather} at the end of the step, and every rank builds the same archive
 \end{itemize}
 
 \begin{itemize}
@@ -263,7 +289,7 @@ The measured speed is in Section~\ref{sec:val-parallel}.
 \toprule
 \texttt{kind\_adapter} & contents \\
 \midrule
-\texttt{simple\_function} & analytic objective (shifted sphere functions $f_k(\mathbf{x}) = |\mathbf{x} - 2(k-1)\mathbf{1}|^2$); no external code. Used for verification \\
+\texttt{simple\_function} & analytic objective (shifted sphere functions $f_k(\mathbf{x}) = |\mathbf{x} - 2(k-1)\mathbf{1}|^2$, or with \texttt{function\_type: rastrigin} the Rastrigin function with its minimum at the same place); no external code. Used for verification \\
 \texttt{example\_externalcode} & template that drives an external code; curve fitting \\
 \texttt{tacode} & trajectory code Tacode (Python and Fortran versions); estimates the atmospheric density from orbit observations \cite{takahashi2022,sakai2024} \\
 \texttt{heatcond} & heat conduction; estimates the heat flux from the history of the surface temperature \\
@@ -285,7 +311,7 @@ The results are written to \texttt{<method>.result\_dir} as Tecplot ASCII.
 
 \begin{itemize}
 \item \texttt{filename\_output} (PSO, ABC, GA): the position (and for PSO the velocity, for GA the non-dominated rank), number, error and residual of every candidate at every step (generation), one Tecplot zone per step
-\item \texttt{filename\_global} (PSO, ABC, GA): the number, value and position of the archive (PSO), the best so far (ABC) or the first front (GA; the best for one objective) at every step. For several objectives with PSO, the rows of the last step are the final archive, \textbf{not the Pareto front over the whole history} (known issue 10)
+\item \texttt{filename\_global} (PSO, ABC, GA): the number, value and position of the archive (PSO, multi-objective ABC), the best so far (single-objective ABC) or the first front (GA; the best for one objective) at every step. For several objectives with PSO, the rows of the last step are the final archive, \textbf{not the Pareto front over the whole history} (known issue 10). The archive of multi-objective ABC is built from the evaluations of all steps
 \item \texttt{filename\_output} (Bayesian optimization): the points, values and numbers in the order of evaluation
 \end{itemize}
 
@@ -327,7 +353,7 @@ with equality only when $\mathbf{x}$ lies on the segment joining $\mathbf{0}$ an
 \begin{figure}[h]
 \centering
 \includegraphics[width=0.95\linewidth]{pareto.png}
-\caption{PSO and GA with two objectives. Left: in objective space, the archive of PSO, the first front of the last generation of GA and the exact Pareto front. Right: the distance $\delta$ from the Pareto set (maximum and mean over the archive for PSO, mean over the front for GA) and the size of the archive of PSO (dotted).}
+\caption{PSO, GA and ABC with two objectives. Left: in objective space, the archive of PSO, the first front of the last generation of GA, the archive of the last step of ABC and the exact Pareto front. Right: the distance $\delta$ from the Pareto set (maximum and mean over the archive for PSO, mean over the front for GA, mean over the archive for ABC) and the size of the archive of PSO (dotted).}
 \label{fig:pareto}
 \end{figure}
 
@@ -335,19 +361,69 @@ Figure~\ref{fig:pareto} shows the results. The final archive has 31 points, with
 
 Solved by GA (40 individuals, 100 generations, survivor selection of NSGA-II), all 40 points of the last generation are in the first front and cover $f_1$ from 0.05 to 20.0, \textbf{the whole front up to both ends} (squares in Figure~\ref{fig:pareto}). The mean $\delta$ is 0.084 and the maximum 0.21: the mean is slightly larger than with PSO, the maximum smaller. The mean $\delta$ keeps falling to the end, 0.29 at generation 20 and 0.10 at generation 60, with no plateau as in PSO. GA keeps parents and children together, so good points survive across generations, and selects by crowding distance, so the points spread over the front. For the whole front with several objectives, and in particular for its ends, use GA.
 
+With multi-objective ABC (20 employed and 20 onlooker bees, \texttt{visit\_limit} = 10, \texttt{num\_archive} = 40, 100 steps; \texttt{report/verification/abc\_pareto}), the final archive has 40 points covering $f_1$ from 0.15 to 17.4, nearly the whole front (triangles in Figure~\ref{fig:pareto}). The mean $\delta$ is 0.18 and the maximum 0.45, larger than with GA (0.084 and 0.21). The mean $\delta$ keeps falling to the end, 1.49 at step 20, 0.52 at step 40 and 0.26 at step 60, but more slowly than with GA. A step takes about 40 evaluations (20 employed + 20 onlooker bees + scouts), about the same as a generation of GA (40). The neighbourhood search of ABC moves one dimension at a time, which we take to be why it fills the five-dimensional segment (the Pareto set) slowly. On this problem, try GA first for several objectives.
+
+\subsection{Weight coefficients of PSO}\label{sec:val-schedule}
+
+The weight coefficients of Section~\ref{sec:pso} were compared on the sphere function and on the Rastrigin function
+
+\begin{equation}
+  f(\mathbf{x}) = \sum_{i=1}^{d} \left[ x_i^2 - 10 \cos(2\pi x_i) + 10 \right],
+\end{equation}
+
+which has many local minima. Its minimum is $f = 0$ at the origin; local minima lie near the integer lattice points, and the one next to the origin has $f \approx 1$. In five dimensions, with the range $[-5.12, 5.12]$ for Rastrigin and $[-10, 10]$ for the sphere, 20 particles ran 200 steps (no stop by the convergence criterion), 30 times per setting with different random seeds (\texttt{report/run\_pso\_schedule.py}, about 25~s). Table~\ref{tab:schedule} lists the seven settings. $w = 0.73$, $c = 1.5$ is equivalent to the constriction coefficient of Clerc and Kennedy \cite{clerc2002}; $w = 0.45$, $c = 1.5$ is a control, the best on Rastrigin among $w$ = 0.45, 0.5, 0.55 and 0.6 with $c = 1.5$.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabularx}{\linewidth}{Xrrr}
+\toprule
+setting & Rastrigin, median & Rastrigin, $f < 1$ & sphere, median \\
+\midrule
+constant $w = 0.5$, $c_1 = c_2 = 1.0$ (verification default) & 4.97 & 1/30 & $2.9 \times 10^{-42}$ \\
+constant $w = 0.73$, $c_1 = c_2 = 1.5$ & 15.2 & 0/30 & $4.0 \times 10^{-8}$ \\
+constant $w = 0.45$, $c_1 = c_2 = 1.5$ (control) & 1.99 & 13/30 & $3.8 \times 10^{-35}$ \\
+linear $w$, $c_1 = c_2 = 1.5$ & 6.16 & 3/30 & $1.3 \times 10^{-15}$ \\
+adaptive $w$, $c_1 = c_2 = 1.5$ & 0.995 & 17/30 & $2.5 \times 10^{-21}$ \\
+linear $w$, TVAC & 11.3 & 0/30 & $2.2 \times 10^{-13}$ \\
+adaptive $w$, TVAC & 0.995 & 20/30 & $7.2 \times 10^{-21}$ \\
+\bottomrule
+\end{tabularx}
+\caption{Weight coefficients of PSO: the median over 30 runs of the best so far after 200 steps, and the number of runs reaching $f < 1$ on Rastrigin (the basin of the origin). $w$ of linear and adaptive lies between 0.9 and 0.4.}
+\label{tab:schedule}
+\end{table}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.98\linewidth]{pso_schedule.png}
+\caption{Weight coefficients of PSO. Left: Rastrigin, middle: sphere, the best so far (median of 30 runs). Right: the inertia weight $w$ on Rastrigin (median of 30 runs).}
+\label{fig:schedule}
+\end{figure}
+
+Table~\ref{tab:schedule} and Figure~\ref{fig:schedule} show the results.
+
+\begin{itemize}
+\item On Rastrigin, the adaptive $w$ (with or without TVAC) reaches a median of 0.995 (the local minimum next to the origin), and 17 and 20 of the 30 runs reach the basin of the origin. The verification default stops at the local minimum 4.97 at step 53 and does not move afterwards
+\item However, \textbf{most of the gain comes from raising $c$ from 1.0 to 1.5}. The control with $c = 1.5$ and $w$ fixed at 0.45 gives a median of 1.99 and 13 runs. The difference between adaptive and the control is not significant with 30 runs (one-sided Mann--Whitney test, $p = 0.19$). The adaptive $w$ falls from 0.9 to 0.5 in about 7 steps and stays between 0.43 and 0.58 afterwards (right of Figure~\ref{fig:schedule}): adaptive \textbf{found by itself} the $w$ of the control, which was found by scanning. The benefit of adaptive is to give about the result of a scanned $w$ without scanning
+\item The linear $w$, alone and combined with TVAC, was worse on this problem than both the verification default and the control. With the linear $w$, the median does not fall below 20 until step 100, where $w$ is 0.65, and then improves to 6.2 at step 200 as $w$ decreases. This PSO has no velocity limit and its leader is the best of the current step (known issues 10, 21), which we take to keep the swarm from settling while $w$ is large; the linear $w$ in the literature is often used together with a velocity limit
+\item On the sphere, the verification default ($w = 0.5$, $c = 1.0$) is the fastest: with a single basin, narrowing the swarm early pays. All 30 adaptive runs also converged to about $10^{-20}$
+\end{itemize}
+
+The default stays constant (so that existing settings keep their answers). For problems where local minima are suspected, try \texttt{inertia\_schedule: adaptive} with $c_1 = c_2 = 1.5$ first; for problems known to have a single basin, the constant $w = 0.5$, $c = 1.0$ is faster. Only two functions in five dimensions were compared here, and nothing is claimed about other problems.
+
 \subsection{Reproducibility}
 
-Run twice with the same seed, the \texttt{output\_global.dat} of the five cases of PSO, ABC and GA agreed bit for bit. In a serial run the answer of Borealis is fixed by the seed alone. With the concurrent evaluation of PSO and GA (\texttt{num\_parallel}) the random numbers are drawn outside the threads, so the answer is the same as in a serial run. The concurrent evaluation of ABC changes the answer in the employed phase only, and does not depend on the number of threads (both checked by tests). Under MPI each rank has its own random stream, and the answer changes with the number of processes.
+Run twice with the same seed, the \texttt{output\_global.dat} of the six cases of PSO, ABC and GA agreed bit for bit. In a serial run the answer of Borealis is fixed by the seed alone. With the concurrent evaluation of PSO and GA (\texttt{num\_parallel}) the random numbers are drawn outside the threads, so the answer is the same as in a serial run. The concurrent evaluation of ABC changes the answer in the employed phase only, and does not depend on the number of threads (both checked by tests). Under MPI each rank has its own random stream, and the answer changes with the number of processes.
 
 \subsection{Tests and CI}\label{sec:tests}
 
-\texttt{tests/} holds pytest tests, run by \texttt{python3 -m pytest tests} (42 tests, about 27~s on the development machine; the 3 of Bayesian optimization are skipped where bayesian-optimization is not installed):
+\texttt{tests/} holds pytest tests, run by \texttt{python3 -m pytest tests} (49 tests, about 30~s on the development machine; the 3 of Bayesian optimization are skipped where bayesian-optimization is not installed):
 
 \begin{itemize}
 \item the tools of \texttt{orbital}: time units, the default path, the search for the corresponding point (checked against the former loop, and outside the range), the geodetic round trip, the check of objective values, and starting an external code (exit status, an old result file, and no MPI environment variables leaking to the child)
 \item the configuration check: warnings for unknown and obsolete keys, and no unknown key in any \texttt{borealis.yml} of the repository
-\item the methods end to end: convergence and reproducibility of PSO, the concurrent evaluation giving the serial answer, the sign of maximization, approach to the Pareto set with two objectives, a monotone best so far of ABC, ABC refusing several objectives, GA keeping crossover and mutation within the bounds, its non-dominated sorting, monotone best, reproducibility, concurrent evaluation and covering of the front with two objectives, and convergence, reproducibility, maximization and the refusal of unavailable models in Bayesian optimization
-\item MPI: PSO, ABC and GA with 13 candidates on 3 processes (only where \texttt{mpirun} exists)
+\item the methods end to end: convergence and reproducibility of PSO, the concurrent evaluation giving the serial answer, the sign of maximization, approach to the Pareto set with two objectives, a monotone best so far of ABC, ABC with two objectives (mutually non-dominated archive points, the size limit, approach to the Pareto set, reproducibility, concurrent evaluation and maximization per objective), the weight coefficients of PSO (the values of linear, the range and convergence of adaptive, stopping on an invalid name), the values of the Rastrigin function, GA keeping crossover and mutation within the bounds, its non-dominated sorting, monotone best, reproducibility, concurrent evaluation and covering of the front with two objectives, and convergence, reproducibility, maximization and the refusal of unavailable models in Bayesian optimization
+\item MPI: PSO, ABC and GA with 13 candidates on 3 processes, and ABC also with two objectives (only where \texttt{mpirun} exists)
 \item \texttt{shapeoptimizer} with a dummy external code without MPI: concurrent evaluation, one and two objectives, the core assignment, and the penalty on failure
 \end{itemize}
 
@@ -440,6 +516,10 @@ The list and the details are in the development record kept outside the reposito
 \begin{thebibliography}{99}
 \bibitem{kennedy1995} J. Kennedy and R. Eberhart, ``Particle swarm optimization,'' \textit{Proc. ICNN'95}, vol.~4, pp.~1942--1948, 1995.
 \bibitem{shi1998} Y. Shi and R. Eberhart, ``A modified particle swarm optimizer,'' \textit{Proc. IEEE ICEC}, pp.~69--73, 1998.
+\bibitem{shi1999} Y. Shi and R. C. Eberhart, ``Empirical study of particle swarm optimization,'' \textit{Proc. CEC 1999}, vol.~3, pp.~1945--1950, 1999.
+\bibitem{nickabadi2011} A. Nickabadi, M. M. Ebadzadeh, and R. Safabakhsh, ``A novel particle swarm optimization algorithm with adaptive inertia weight,'' \textit{Applied Soft Computing}, vol.~11, no.~4, pp.~3658--3670, 2011.
+\bibitem{ratnaweera2004} A. Ratnaweera, S. K. Halgamuge, and H. C. Watson, ``Self-organizing hierarchical particle swarm optimizer with time-varying acceleration coefficients,'' \textit{IEEE Trans. Evol. Comput.}, vol.~8, no.~3, pp.~240--255, 2004.
+\bibitem{clerc2002} M. Clerc and J. Kennedy, ``The particle swarm -- explosion, stability, and convergence in a multidimensional complex space,'' \textit{IEEE Trans. Evol. Comput.}, vol.~6, no.~1, pp.~58--73, 2002.
 \bibitem{coello2004} C. A. Coello Coello, G. T. Pulido, and M. S. Lechuga, ``Handling multiple objectives with particle swarm optimization,'' \textit{IEEE Trans. Evol. Comput.}, vol.~8, no.~3, pp.~256--279, 2004.
 \bibitem{karaboga2005} D. Karaboga, ``An idea based on honey bee swarm for numerical optimization,'' Technical Report TR06, Erciyes University, 2005.
 \bibitem{karaboga2007} D. Karaboga and B. Basturk, ``A powerful and efficient algorithm for numerical function optimization: artificial bee colony (ABC) algorithm,'' \textit{J. Global Optim.}, vol.~39, pp.~459--471, 2007.

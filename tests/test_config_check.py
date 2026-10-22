@@ -11,6 +11,13 @@ from config_check.config_check import check_config
 def test_clean_config_has_no_warning():
     assert check_config(sphere_config("PSO")) == []
     assert check_config(sphere_config("ABC")) == []
+    config = sphere_config("PSO", inertia_schedule="adaptive", inertia_max=0.9, inertia_min=0.4,
+                           coefficient_schedule="linear", cognitive_coef_initial=2.5, cognitive_coef_final=0.5,
+                           social_coef_initial=0.5, social_coef_final=2.5)
+    config["simple_function"]["function_type"] = "rastrigin"
+    assert check_config(config) == []
+    assert check_config(sphere_config("ABC", num_objectives=2, maximize=[False, False], num_archive=20,
+                                      windowsize_archive=5, tolerance_archive=0.0)) == []
 
 
 def test_unknown_and_obsolete_keys():

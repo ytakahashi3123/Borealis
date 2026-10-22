@@ -81,10 +81,7 @@ class optimizer_pso(orbital):
     return parameter_boundary
 
 
-  # For multi-objective optimization
-  def dominates(self, a, b):
-    return np.all(a <= b) and np.any(a < b)
-
+  # For multi-objective optimization（dominates は orbital にある）
   def update_archive(self, num_objectives, ids, positions, scores):
     #　全履歴・全粒子から最も良いものを探すのか良いのか、１世代・全粒子からが良いのか（今回は後者とした）
 #    all_ids = self.ids + list(ids)
@@ -125,11 +122,11 @@ class optimizer_pso(orbital):
     if len(archive_scores[0]) == 1:
       idx = np.argmin([s[0] for s in archive_scores])
       return archive_positions[idx]
-    distance = self.crowding_distance(archive_scores)
+    distance = self.crowding_distance_archive(archive_scores)
     idx = np.argmax(distance)
     return archive_positions[idx]
 
-  def crowding_distance(self, scores):
+  def crowding_distance_archive(self, scores):
     # パレートフロントの疎な領域にある解を優先して leader に選ぶ
     scores = np.array(scores)
     n_points = len(scores)
@@ -168,9 +165,35 @@ class optimizer_pso(orbital):
     tolerance_archive   = float( config['PSO'].get('tolerance_archive',1.0) )
     
     # Particle parameters
-    inertia        = config['PSO']['inertia']
-    cognitive_coef = config['PSO']['cognitive_coef']
-    social_coef    = config['PSO']['social_coef']
+    # 慣性の重み w の決め方 (inertia_schedule)
+    #   constant: inertia で一定（既定。以前と同じ）
+    #   linear  : inertia_max から inertia_min へ、ステップとともに線形に下げる (Shi and Eberhart, 1999)
+    #   adaptive: そのステップで個人の最良を更新した粒子の割合 S から w = inertia_min + (inertia_max - inertia_min) S
+    #             （更新が多い = 探索がうまくいっているときは大きく、停滞したら小さく。Nickabadi et al., 2011）
+    # 加速係数 c1, c2 の決め方 (coefficient_schedule)
+    #   constant: cognitive_coef, social_coef で一定（既定。以前と同じ）
+    #   linear  : c1 を大から小へ、c2 を小から大へ線形に変える（序盤は各粒子の探索、終盤は群れの収束。
+    #             TVAC; Ratnaweera et al., 2004）
+    inertia_schedule     = config['PSO'].get('inertia_schedule', 'constant')
+    coefficient_schedule = config['PSO'].get('coefficient_schedule', 'constant')
+    if inertia_schedule == 'constant':
+      inertia = config['PSO']['inertia']
+    elif inertia_schedule in ('linear', 'adaptive'):
+      inertia_max = float( config['PSO'].get('inertia_max', 0.9) )
+      inertia_min = float( config['PSO'].get('inertia_min', 0.4) )
+    else:
+      super().stop_program(f"[PSO-Borealis] Error: PSO.inertia_schedule must be constant, linear or adaptive: {inertia_schedule}", self.mpi_instance)
+    if coefficient_schedule == 'constant':
+      cognitive_coef = config['PSO']['cognitive_coef']
+      social_coef    = config['PSO']['social_coef']
+    elif coefficient_schedule == 'linear':
+      cognitive_coef_initial = float( config['PSO'].get('cognitive_coef_initial', 2.5) )
+      cognitive_coef_final   = float( config['PSO'].get('cognitive_coef_final',   0.5) )
+      social_coef_initial    = float( config['PSO'].get('social_coef_initial',    0.5) )
+      social_coef_final      = float( config['PSO'].get('social_coef_final',      2.5) )
+    else:
+      super().stop_program(f"[PSO-Borealis] Error: PSO.coefficient_schedule must be constant or linear: {coefficient_schedule}", self.mpi_instance)
+    flag_schedule = (inertia_schedule != 'constant') or (coefficient_schedule != 'constant')
 
     # Maximization or minimization of the objective function
     #flag_Maximization_of = config['PSO']['maximize']
@@ -294,6 +317,7 @@ class optimizer_pso(orbital):
       else:
         scores = list( executor.map(evaluate_particle, particle_indices) )
 
+      num_improved = 0
       for i, score in zip(particle_indices, scores):
         # パーソナルベストの更新
         id_serial = n*num_particle + i + 1
@@ -302,6 +326,7 @@ class optimizer_pso(orbital):
         if self.dominates(score, particle_best_score[i]):
           particle_best_position[i] = particle_position[i].copy()
           particle_best_score[i] = score.copy()
+          num_improved += 1
 
         local_ids.append( id_serial )
         local_positions.append( particle_position[i].copy() )
@@ -346,6 +371,19 @@ class optimizer_pso(orbital):
       archive_position_history.append( np.array(archive_positions).copy() )
       archive_score_history.append( np.array(archive_scores).copy() )
       archive_size_history.append( len(archive_positions) )
+
+      # 重み係数のスケジュール。進み具合 progress は 0（最初のステップ）から 1（num_optiter ステップ目）
+      progress = n / (num_optiter - 1) if num_optiter > 1 else 1.0
+      if inertia_schedule == 'linear':
+        inertia = inertia_max - (inertia_max - inertia_min) * progress
+      elif inertia_schedule == 'adaptive':
+        # 個人の最良を更新した粒子の割合（全ランクの合計。全ランクで同じ w になる）
+        if flag_mpi:
+          num_improved = comm.allreduce(num_improved, op=MPI.SUM)
+        inertia = inertia_min + (inertia_max - inertia_min) * num_improved / num_particle
+      if coefficient_schedule == 'linear':
+        cognitive_coef = cognitive_coef_initial + (cognitive_coef_final - cognitive_coef_initial) * progress
+        social_coef    = social_coef_initial    + (social_coef_final    - social_coef_initial)    * progress
 
       # パーティクルの速度の更新
       for i in range(num_particle_start, num_particle_end):
@@ -437,6 +475,8 @@ class optimizer_pso(orbital):
         else:
           print('[PSO-Borealis] Step:', n+1, ', Swarm residual:', self.text_color + f'{residual_mean:.10e}'  + self.text_end, 
                                              ', Archive change:', self.text_color + f'{archive_change:.10e}' + self.text_end)
+        if flag_schedule:
+          print(f'[PSO-Borealis] Step: {n+1}, Inertia: {inertia:.5f}, Cognitive coef: {cognitive_coef:.5f}, Social coef: {social_coef:.5f}')
 
       # --Convergence check
       if num_objectives == 1:

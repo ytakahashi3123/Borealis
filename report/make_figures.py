@@ -124,6 +124,13 @@ def fig_pareto():
         g_dev = np.linalg.norm(g_x, axis=1) + np.linalg.norm(g_x - 2.0, axis=1) - C_NORM
         g_steps = np.unique(g[:, 0])
         ga_rows = (g, g_dev, g_steps)
+    abc_rows = None
+    abc_file = os.path.join(VERIF, "abc_pareto", "result_ABC", "output_global.dat")
+    if os.path.exists(abc_file):
+        b = np.array(read_tecplot_rows(abc_file))
+        b_x = b[:, 4:4+NUM_DIM]
+        b_dev = np.linalg.norm(b_x, axis=1) + np.linalg.norm(b_x - 2.0, axis=1) - C_NORM
+        abc_rows = (b, b_dev, np.unique(b[:, 0]))
 
     fig, axes = plt.subplots(1, 2, figsize=(8.4, 3.4))
     ax = axes[0]
@@ -138,12 +145,20 @@ def fig_pareto():
         g_last = g[:, 0] == g_steps[-1]
         ax.plot(g[g_last, 2], g[g_last, 3], "s", color=COLOR_D, ms=3.0, mfc="none", label=f"GA front, generation {int(g_steps[-1])}")
         print("pareto.png: GA front", int(np.sum(g_last)), "points, mean deviation", g_dev[g_last].mean(), ", max", g_dev[g_last].max())
+    if abc_rows is not None:
+        b, b_dev, b_steps = abc_rows
+        b_last = b[:, 0] == b_steps[-1]
+        ax.plot(b[b_last, 2], b[b_last, 3], "^", color=COLOR_C, ms=3.0, mfc="none", label=f"ABC archive, step {int(b_steps[-1])}")
+        print("pareto.png: ABC archive", int(np.sum(b_last)), "points, mean deviation", b_dev[b_last].mean(), ", max", b_dev[b_last].max(),
+              ", f1", b[b_last, 2].min(), "-", b[b_last, 2].max())
+        for s_ in (20, 40, 60):
+            print(f"pareto.png: ABC step {s_}: mean deviation", b_dev[b[:, 0] == s_].mean(), ", size", int(np.sum(b[:, 0] == s_)))
     ax.set_xlim(0, 25)
     ax.set_ylim(0, 25)
     ax.set_xlabel(r"$f_1 = |\mathbf{x}|^2$")
     ax.set_ylabel(r"$f_2 = |\mathbf{x} - 2\mathbf{1}|^2$")
     ax.set_aspect("equal")
-    ax.legend(fontsize=7.5)
+    ax.legend(fontsize=7)
     ax.set_title("Objective space")
 
     ax = axes[1]
@@ -152,18 +167,66 @@ def fig_pareto():
     if ga_rows is not None:
         g, g_dev, g_steps = ga_rows
         ax.semilogy(g_steps, [g_dev[g[:, 0] == s_].mean() for s_ in g_steps], "-", color=COLOR_D, lw=1.0, label="GA, mean over front")
+    if abc_rows is not None:
+        b, b_dev, b_steps = abc_rows
+        ax.semilogy(b_steps, [b_dev[b[:, 0] == s_].mean() for s_ in b_steps], "-", color=COLOR_C, lw=1.0, label="ABC, mean over archive")
     ax.set_xlabel("step")
     ax.set_ylabel(r"$|\mathbf{x}| + |\mathbf{x} - 2\mathbf{1}| - 2\sqrt{5}$")
     ax.set_title("Distance from the Pareto set")
     ax2 = ax.twinx()
     ax2.plot(steps, size, ":", color="0.4", lw=1.0)
-    ax2.set_ylabel("archive size (dotted)")
+    ax2.set_ylabel("PSO archive size (dotted)")
     ax2.grid(False)
-    ax.legend(fontsize=7.5, loc="upper right")
+    ax.legend(fontsize=7, loc="upper right")
     fig.tight_layout()
     fig.savefig(os.path.join(OUT, "pareto.png"))
     plt.close(fig)
     print("pareto.png: final archive", int(size[-1]), "points, max deviation", dev_max[-1], ", mean", dev_mean[-1])
+
+
+def fig_pso_schedule():
+    """PSO の重み係数の決め方: Rastrigin と球関数でのそれまでの最良（30 回の中央値）と、慣性の重み w"""
+    files = {f: os.path.join(DATA, f"pso_schedule_{f}.dat") for f in ("rastrigin", "sphere", "rastrigin_inertia")}
+    if not all(os.path.exists(v) for v in files.values()):
+        print("pso_schedule.png: skipped (run report/run_pso_schedule.py first)")
+        return
+    with open(files["rastrigin"]) as f:
+        names = [line for line in f if line.startswith("# step")][0].split()[2:]
+    styles = {
+        "constant_w0.5_c1.0":  ("-",  "0.45", r"constant $w=0.5$, $c_1=c_2=1.0$"),
+        "constant_w0.73_c1.5": ("--", "0.45", r"constant $w=0.73$, $c_1=c_2=1.5$"),
+        "constant_w0.45_c1.5": (":",  "0.1",  r"constant $w=0.45$, $c_1=c_2=1.5$"),
+        "linear_w_c1.5":       ("-",  COLOR_A, r"linear $w$, $c_1=c_2=1.5$"),
+        "adaptive_w_c1.5":     ("-",  COLOR_B, r"adaptive $w$, $c_1=c_2=1.5$"),
+        "linear_w_tvac":       ("--", COLOR_A, r"linear $w$, TVAC"),
+        "adaptive_w_tvac":     ("--", COLOR_B, r"adaptive $w$, TVAC"),
+    }
+    fig, axes = plt.subplots(1, 3, figsize=(11.0, 4.0))
+    for ax, function_type, title in ((axes[0], "rastrigin", "Rastrigin, 5 dimensions"), (axes[1], "sphere", "Sphere, 5 dimensions")):
+        data = np.loadtxt(files[function_type])
+        for k, name in enumerate(names):
+            ls, color, label = styles.get(name, ("-", "k", name))
+            ax.semilogy(data[:, 0], data[:, k+1], ls, color=color, lw=1.0, label=label)
+        ax.set_xlabel("step (20 particles)")
+        ax.set_ylabel("best so far, median of 30 runs")
+        ax.set_title(title)
+    axes[0].set_ylim(0.5, 60)
+    handles, labels = axes[0].get_legend_handles_labels()
+    data = np.loadtxt(files["rastrigin_inertia"])
+    ax = axes[2]
+    for name in ("linear_w_c1.5", "adaptive_w_c1.5", "adaptive_w_tvac"):
+        ls, color, label = styles[name]
+        ax.plot(data[:, 0], data[:, names.index(name)+1], ls, color=color, lw=1.0, label=label)
+    ax.axhline(0.45, ls=":", color="0.1", lw=1.0, label=r"constant $w=0.45$")
+    ax.set_ylim(0.35, 0.95)
+    ax.set_xlabel("step")
+    ax.set_ylabel("inertia weight $w$, median of 30 runs")
+    ax.set_title("Inertia weight on Rastrigin")
+    fig.legend(handles, labels, fontsize=7.5, loc="lower center", ncol=4)
+    fig.tight_layout(rect=(0, 0.12, 1, 1))
+    fig.savefig(os.path.join(OUT, "pso_schedule.png"))
+    plt.close(fig)
+    print("pso_schedule.png:", ", ".join(names))
 
 
 def read_timeline(filename, has_slot):
@@ -223,4 +286,5 @@ if __name__ == "__main__":
     os.makedirs(OUT, exist_ok=True)
     fig_convergence()
     fig_pareto()
+    fig_pso_schedule()
     fig_parallel()

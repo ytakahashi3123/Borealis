@@ -27,6 +27,11 @@ class adapter_simple_function(orbital):
     # Number of objectives
     self.num_objectives = config['objectives']['num_objectives']
 
+    # 関数の種類: sphere（既定。谷が 1 つ）または rastrigin（局所解が格子状に並ぶ）
+    self.function_type = config['simple_function'].get('function_type', 'sphere')
+    if self.function_type not in ('sphere', 'rastrigin'):
+      super().stop_program(f"[simple_function] Error: simple_function.function_type must be sphere or rastrigin: {self.function_type}", self.mpi_instance)
+
     #if config['simple_function']['flag_eval']:
     #x = 2
     #function_user = eval(config['simple_function']['function_eval'])
@@ -80,11 +85,17 @@ class adapter_simple_function(orbital):
 
   def function(self, x):
     # For multi-objective: Sphere_function with shift
+    # 目的 k (0 始まり) の最小は x_i = 2k。rastrigin は f = sum[ z^2 - 10 cos(2 pi z) + 10 ], z = x_i - 2k
+    # （最小値 0。整数の格子点の近くに局所解がある）
     x = np.asarray(x)
     objectives = []
     for i in range(self.num_objectives):
       shift = float(i) * 2.0
-      f = np.sum((x - shift) ** 2)
+      if self.function_type == 'rastrigin':
+        z = x - shift
+        f = np.sum(z ** 2 - 10.0 * np.cos(2.0 * np.pi * z) + 10.0)
+      else:
+        f = np.sum((x - shift) ** 2)
       objectives.append(f)
     return np.array(objectives)
 

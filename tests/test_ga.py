@@ -30,6 +30,11 @@ def test_non_dominated_sort_and_selection():
     assert ga.non_dominated_sort(scores).tolist() == [0, 0, 0, 1, 2]
     selected = ga.environmental_selection(scores, 3)
     assert sorted(selected.tolist()) == [0, 1, 2]
+    # 配列の演算で求める第 1 フロント（ABC のアーカイブが使う）は、順位 0 と一致する
+    rng = np.random.default_rng(3)
+    for _ in range(20):
+        scores = rng.integers(0, 5, size=(30, 3)).astype(float)   # 同じ値を含む
+        assert np.array_equal(ga.non_dominated_mask(scores), ga.non_dominated_sort(scores) == 0)
 
 
 def test_ga_converges_monotonically_and_is_reproducible(workdir):

@@ -76,63 +76,8 @@ class optimizer_ga(orbital):
 
 
   # ---------------------------------------------------------------------------
-  # NSGA-II の道具
+  # NSGA-II の道具（支配・非劣解ソート・混雑距離は orbital にあり、ABC と共有する）
   # ---------------------------------------------------------------------------
-  def dominates(self, a, b):
-    return np.all(a <= b) and np.any(a < b)
-
-
-  def non_dominated_sort(self, scores):
-    # 非劣解の順位（0 が第 1 フロント）。高速な非劣解ソート (Deb et al., 2002)
-    num = len(scores)
-    dominated_by = [ [] for _ in range(num) ]
-    count_dominating = np.zeros(num, dtype=int)
-    rank = np.zeros(num, dtype=int)
-    front = []
-    for p in range(num):
-      for q in range(num):
-        if p == q:
-          continue
-        if self.dominates(scores[p], scores[q]):
-          dominated_by[p].append(q)
-        elif self.dominates(scores[q], scores[p]):
-          count_dominating[p] += 1
-      if count_dominating[p] == 0:
-        front.append(p)
-    level = 0
-    while front:
-      next_front = []
-      for p in front:
-        rank[p] = level
-        for q in dominated_by[p]:
-          count_dominating[q] -= 1
-          if count_dominating[q] == 0:
-            next_front.append(q)
-      level += 1
-      front = next_front
-    return rank
-
-
-  def crowding_distance(self, scores, rank):
-    # 同じフロントの中での混雑距離。端の個体は無限大
-    scores = np.asarray(scores)
-    distance = np.zeros(len(scores))
-    for level in np.unique(rank):
-      index = np.where(rank == level)[0]
-      if len(index) <= 2:
-        distance[index] = np.inf
-        continue
-      for m in range(scores.shape[1]):
-        order = index[ np.argsort(scores[index, m], kind='stable') ]
-        distance[order[0]] = np.inf
-        distance[order[-1]] = np.inf
-        f_range = scores[order[-1], m] - scores[order[0], m]
-        if f_range < 1.0e-15:
-          continue
-        distance[order[1:-1]] += (scores[order[2:], m] - scores[order[:-2], m]) / f_range
-    return distance
-
-
   def environmental_selection(self, scores, num_select):
     # 順位の小さい順、同じ順位では混雑距離の大きい順に num_select 個を選ぶ
     rank = self.non_dominated_sort(scores)

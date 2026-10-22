@@ -11,6 +11,8 @@ that silently corrupted the answer -- `maximize` ignored by most adapters, NaN o
 the factor of `timeunit: hour`, the time matching that wrapped round to the end of the reference data, unchecked
 failures of the external code, the broken default path -- and adds a check of the configuration keys, a random seed
 (`optimizer.seed`), unit and end-to-end tests (`tests/`) and continuous integration on GitHub Actions.
+After 1.7.0 (not yet in a release; see `CHANGELOG.md`), ABC also handles several objectives, and the inertia weight and acceleration
+coefficients of PSO can change linearly with the step or, for the inertia weight, adaptively with the success rate.
 What is still open is tracked as numbered known issues in a list kept outside the repository, and the documents
 refer to them by number ("known issue 7"). The changes are listed in `CHANGELOG.md`.
 
@@ -66,7 +68,7 @@ tacode:                         # settings of the adapter: template, control fil
 
 | | what is there | detail |
 |---|---|---|
-| **Optimizers** | particle swarm optimization (PSO), with an archive of non-dominated solutions for several objectives; artificial bee colony (ABC); a real-coded genetic algorithm (GA: SBX crossover, polynomial mutation and the survivor selection of NSGA-II, so it is NSGA-II for several objectives); Bayesian optimization (Gaussian process with EI, PI or UCB) through bayesian-optimization | report, "Optimization methods" |
+| **Optimizers** | particle swarm optimization (PSO), with an archive of non-dominated solutions for several objectives and a constant, linearly decreasing or adaptive inertia weight; artificial bee colony (ABC), with an external archive of non-dominated solutions for several objectives; a real-coded genetic algorithm (GA: SBX crossover, polynomial mutation and the survivor selection of NSGA-II, so it is NSGA-II for several objectives); Bayesian optimization (Gaussian process with EI, PI or UCB) through bayesian-optimization | report, "Optimization methods" |
 | **Parallel** | PSO, ABC and GA share the candidates among MPI processes (`mpirun -n N`) for serial external codes; PSO, GA and ABC evaluate candidates concurrently in threads (`num_parallel`) for external codes that run under MPI, each case bound to its own cores | report, "Parallelization" |
 | **Adapters** | Tacode (trajectory, Python and Fortran versions), heat conduction, SU2 + preCICE shape optimization, cage, an analytic test function, a template for any external code, a slot for your own | table below |
 | **Constraints** | a penalty outside the bounds; for shape optimization a penalty on the change of surface area and on failed runs | `report/borealis_config_ja.pdf` |
@@ -76,7 +78,7 @@ Adapters (`adapter.kind_adapter`):
 
 | `kind_adapter` | module | description |
 | --- | --- | --- |
-| `simple_function` | `src/adapter_template/adapter_simple_function.py` | analytic test function (shifted sphere functions); minimal template |
+| `simple_function` | `src/adapter_template/adapter_simple_function.py` | analytic test function (shifted sphere or Rastrigin functions); minimal template |
 | `example_externalcode` | `src/adapter_template/adapter_example_externalcode.py` | complete template for driving an external program |
 | `tacode` | `src/adapter_tacode/` | trajectory code `Tacode` (atmospheric density from orbit data) |
 | `heatcond` | `src/adapter_heatcond/` | heat conduction (heat flux from temperature histories) |
@@ -149,7 +151,7 @@ no result file), the evaluation gets the value `parameter_optimized.value_nonfin
 # Output and tools
 
 The results are written as Tecplot ASCII into `<optimizer>.result_dir`: `filename_output` holds every candidate
-at every step, `filename_global` the archive (PSO) or the best (ABC) of every step. The case directory of every
+at every step, `filename_global` the archive (PSO, ABC with several objectives), the first front (GA) or the best (ABC with one objective) of every step. The case directory of every
 evaluation stays under `<adapter>.work_dir`. Utilities independent of the optimization loop are in `src_helper/`,
 each driven by its own YAML file in the working directory:
 
@@ -175,17 +177,18 @@ make figure                      # the figures of the report
 make                             # the PDFs
 ```
 
-`python3 -m pytest tests` runs 42 tests; those of Bayesian optimization are skipped where bayesian-optimization
+`python3 -m pytest tests` runs 49 tests; those of Bayesian optimization are skipped where bayesian-optimization
 is not installed. `tests/` checks the tools shared by all adapters (time units, paths, the time matching, starting an external code),
 the configuration check, PSO, ABC, GA and Bayesian optimization end to end (convergence, reproducibility, concurrent
-evaluation, maximization, two objectives), the distributed runs under MPI and the concurrent evaluation of `shapeoptimizer` with a dummy
+evaluation, maximization, two objectives, the weight schedules of PSO), the distributed runs under MPI and the concurrent evaluation of `shapeoptimizer` with a dummy
 external code. GitHub Actions (`.github/workflows/ci.yml`) runs the syntax check, the tests and the verification
 cases with Python 3.9 and 3.12 on every push and pull request.
 
 `report/verification/` holds cases on the shifted sphere function in five dimensions, whose solution is known:
 PSO with one objective (exact minimum 0), PSO with two objectives (exact Pareto front
-`sqrt(f1) + sqrt(f2) = 2 sqrt(5)`), GA with one and two objectives, ABC and Bayesian optimization. With the same seed they give the same answer bit for bit. The report
-shows the results with figures, together with the measured speed of the concurrent evaluation with a dummy MPI
+`sqrt(f1) + sqrt(f2) = 2 sqrt(5)`), GA and ABC with one and two objectives, and Bayesian optimization. With the same seed they give the same answer bit for bit. The report
+shows the results with figures, together with a comparison of the weight schedules of PSO on the Rastrigin function
+(`report/run_pso_schedule.py`, 30 seeds per setting) and the measured speed of the concurrent evaluation with a dummy MPI
 program and with SU2 + preCICE.
 
 

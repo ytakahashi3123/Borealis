@@ -8,6 +8,25 @@ version is also in `src/borealis.py`. **Changes that alter the answer of an exis
 The detailed development log -- how each decision was reached and the measurements behind it --
 is kept outside the repository.
 
+## [Unreleased]
+
+### Added
+
+- Multi-objective ABC: with `objectives.num_objectives` of 2 or more, food sources are replaced by Pareto dominance,
+  onlookers choose by non-dominated rank, and every evaluated point goes into an external archive of non-dominated
+  solutions, thinned by crowding distance (`ABC.num_archive`, `windowsize_archive`, `tolerance_archive`). `ABC.maximize`
+  may be a list. The single-objective answer is unchanged.
+- Weight schedules of PSO: `PSO.inertia_schedule` (`constant`, `linear`, `adaptive` by the success rate of the
+  personal bests) and `PSO.coefficient_schedule` (`constant`, `linear`, i.e. time-varying acceleration coefficients).
+  The default is `constant`, with the same answer as before.
+- `simple_function.function_type: rastrigin`, a test function with many local minima.
+- A comparison of the PSO weight schedules on the Rastrigin and sphere functions in the report
+  (`report/run_pso_schedule.py`), and a two-objective ABC verification case.
+
+### Fixed
+
+- `\*` in the configuration reference was printed with its backslash.
+
 ## [1.7.0] - 2026-10-20
 
 The previous public release was v1.5.0; the 1.6 series was not released, and its changes are included here.

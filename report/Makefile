@@ -5,6 +5,7 @@
 #   make config : 設定ファイルの対応表 (日本語) を作る
 #   make verify : 検証ケース (verification/) を走らせる
 #   make figure : 検証ケースの結果と data/ の測定値から図を作り直す
+#   make schedule : PSO の重み係数の比べ (data/pso_schedule_*.dat) を作り直す (約 30 秒)
 #   make clean  : 中間ファイルを消す (PDF・図・本文は消さない)
 #   make distclean : PDF も消す
 #
@@ -28,7 +29,7 @@ PDFLATEX ?= pdflatex -interaction=nonstopmode -halt-on-error -file-line-error
 PLATEX   ?= platex -interaction=nonstopmode -halt-on-error -file-line-error
 DVIPDF   ?= dvipdfmx -V 7
 
-.PHONY: all en ja config verify figure clean distclean
+.PHONY: all en ja config verify figure schedule clean distclean
 
 all: en ja config
 
@@ -60,6 +61,9 @@ verify:
 
 figure:
 	$(PYTHON) make_figures.py
+
+schedule:
+	$(PYTHON) run_pso_schedule.py
 
 clean:
 	rm -f *.aux *.log *.out *.toc *.dvi *.fls *.fdb_latexmk *.xdv *.synctex.gz

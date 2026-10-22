@@ -73,8 +73,10 @@ def inline(s):
         return '\x00%d\x00' % (len(codes) - 1)
 
     s = re.sub(r'`([^`]*)`', take_code, s)
+    s = s.replace('\\*', '\x01')          # Markdown のエスケープ \* は、ただの *
     s = escape_text(s)
     s = re.sub(r'\*\*(.+?)\*\*', r'\\textbf{\1}', s)
+    s = s.replace('\x01', '*')
     s = re.sub(r'\x00(\d+)\x00', lambda m: '\\texttt{' + escape_code(codes[int(m.group(1))]) + '}', s)
     return s
 

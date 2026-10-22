@@ -31,3 +31,14 @@ def test_mpi_run_completes(workdir, kind_optimizer):
     assert rc == 0, out
     data = read_global(workdir, f"result_{kind_optimizer}")
     assert len(data) > 0 and np.isfinite(data[:, 2]).all()
+
+
+def test_mpi_abc_two_objectives(workdir):
+    # 多目的 ABC: 各ランクの評価を集めて、全ランクが同じアーカイブを持つ（違えば収束の判定で止まらない）
+    config = sphere_config("ABC", num_objectives=2, maximize=[False, False], num_employ_bees=13, num_onlook_bees=7,
+                           num_optiter=20, num_archive=10)
+    rc, out = run_borealis(workdir, config, command_prefix=_mpi_prefix(3))
+    assert rc == 0, out
+    data = read_global(workdir, "result_ABC")
+    last = data[data[:, 0] == data[:, 0].max()]
+    assert 0 < len(last) <= 10 and np.isfinite(last[:, 2:4]).all()
