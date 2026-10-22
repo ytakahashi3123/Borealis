@@ -8,7 +8,7 @@
 # Contact: ytakahashi@eng.hokudai.ac.jp
 
 code_name = "Borealis"
-version = "1.7.0"
+version = "1.8.0"
 
 import sys
 import numpy as np

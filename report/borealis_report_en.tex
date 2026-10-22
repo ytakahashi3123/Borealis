@@ -15,7 +15,7 @@
 \large A framework for inverse problems and optimization that searches the inputs of external codes}
 \subtitle{Design, methods, parallelization and verification}
 \author{Yusuke Takahashi}
-\date{22 October 2026 (Borealis, development version after 1.7.0)}
+\date{23 October 2026 (Borealis version 1.8.0)}
 
 \affiliation{Hokkaido University}
 \runninghead{Borealis: design, methods, parallelization and verification}
@@ -502,7 +502,7 @@ Two problems that silently corrupted the objective were found along the way: the
 
 \section{Known issues}\label{sec:known-issues}
 
-The list and the details are in the development record kept outside the repository. Version 1.7.0 implemented GA, replaced the library of Bayesian optimization by bayesian-optimization (22) and fixed the issues that silently corrupted the answer (the sign of maximization, NaN, the factor of \texttt{hour}, the wrap-round of the corresponding time, failures of the external code, the default path, \texttt{shapeoptimizer} with one objective) and covers them by tests. What remains:
+The list and the details are in the development record kept outside the repository. Version 1.7.0 implemented GA, replaced the library of Bayesian optimization by bayesian-optimization (22) and fixed the issues that silently corrupted the answer (the sign of maximization, NaN, the factor of \texttt{hour}, the wrap-round of the corresponding time, failures of the external code, the default path, \texttt{shapeoptimizer} with one objective) and covers them by tests. Version 1.8.0 made ABC multi-objective (12) and let the weight coefficients of PSO change. What remains:
 
 \begin{itemize}
 \item Unknown keys give a warning but do not stop the run (4)

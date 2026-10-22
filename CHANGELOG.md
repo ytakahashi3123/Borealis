@@ -8,7 +8,7 @@ version is also in `src/borealis.py`. **Changes that alter the answer of an exis
 The detailed development log -- how each decision was reached and the measurements behind it --
 is kept outside the repository.
 
-## [Unreleased]
+## [1.8.0] - 2026-10-23
 
 ### Added
 

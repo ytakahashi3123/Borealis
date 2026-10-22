@@ -3,7 +3,7 @@
 A framework for inverse problems and optimization: it searches the input parameters of an external
 computer code, or of a simple function, so that the output comes close to reference data.
 
-**Version 1.7.0.** On top of the PSO, ABC and Bayesian optimizers and their distributed runs with `mpi4py`,
+**Version 1.8.0.** On top of the PSO, ABC and Bayesian optimizers and their distributed runs with `mpi4py`,
 it implements a **genetic algorithm** (NSGA-II for several objectives) and adds the **concurrent evaluation** of candidates for external codes that themselves run under MPI
 (`PSO.num_parallel`): Borealis runs as a single process, starts each case with its own set of cores and waits
 for them in threads, because a code started with `mpirun` cannot itself start `mpirun`. It also fixes the problems
@@ -11,8 +11,9 @@ that silently corrupted the answer -- `maximize` ignored by most adapters, NaN o
 the factor of `timeunit: hour`, the time matching that wrapped round to the end of the reference data, unchecked
 failures of the external code, the broken default path -- and adds a check of the configuration keys, a random seed
 (`optimizer.seed`), unit and end-to-end tests (`tests/`) and continuous integration on GitHub Actions.
-After 1.7.0 (not yet in a release; see `CHANGELOG.md`), ABC also handles several objectives, and the inertia weight and acceleration
-coefficients of PSO can change linearly with the step or, for the inertia weight, adaptively with the success rate.
+Version 1.8.0 adds **multi-objective ABC** (an external archive of non-dominated solutions) and lets the inertia weight
+and acceleration coefficients of PSO change linearly with the step or, for the inertia weight, **adaptively** with the
+success rate (`PSO.inertia_schedule`, `PSO.coefficient_schedule`); the defaults keep the answers of 1.7.0.
 What is still open is tracked as numbered known issues in a list kept outside the repository, and the documents
 refer to them by number ("known issue 7"). The changes are listed in `CHANGELOG.md`.
 

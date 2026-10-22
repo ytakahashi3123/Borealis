@@ -25,7 +25,7 @@
 \large 外部の計算コードの入力を探す、逆問題と最適化の枠組み}
 \subtitle{仕組み・手法・並列化・検証}
 \author{高橋裕介}
-\date{2026 年 10 月 22 日 (Borealis version 1.7.0 以降の開発版)}
+\date{2026 年 10 月 23 日 (Borealis version 1.8.0)}
 
 \affiliation{北海道大学}
 \runninghead{Borealis：仕組み・手法・並列化・検証}
@@ -511,7 +511,7 @@ SU2 + preCICE & 12 & 9.3〜10.9 & 46.8 & 120.7 & 2.6 倍 \\
 
 \section{既知の問題}\label{sec:known-issues}
 
-一覧と詳細は、リポジトリの外に置いた開発の記録にある。1.7.0 で、GA を実装し、ベイズ最適化を bayesian-optimization に置き換え（22）、答えを黙って誤らせるもの（最大化の符号、NaN、\texttt{hour} の係数、時刻の対応点の回り込み、外部コードの失敗、既定のパス、単目的の \texttt{shapeoptimizer}）を直し、テストで押さえた。いま残っているのは次のものである。
+一覧と詳細は、リポジトリの外に置いた開発の記録にある。1.7.0 で、GA を実装し、ベイズ最適化を bayesian-optimization に置き換え（22）、答えを黙って誤らせるもの（最大化の符号、NaN、\texttt{hour} の係数、時刻の対応点の回り込み、外部コードの失敗、既定のパス、単目的の \texttt{shapeoptimizer}）を直し、テストで押さえた。1.8.0 で、ABC を多目的に対応させ（12）、PSO の重み係数を変えられるようにした。いま残っているのは次のものである。
 
 \begin{itemize}
 \item 知らないキーは警告だけで、止まらない（4）
